@@ -1,0 +1,16 @@
+{
+  "name": "airone-ai-backbone",
+  "version": "0.1.0",
+  "description": "Airone AI Backbone - Desktop application for robot AI control",
+  "main": "src/main/main.js",
+  "author": "Airone Robotics",
+  "license": "MIT",
+  "dependencies": {
+    "axios": "^1.6.7",
+    "react": "^19.2.6",
+    "react-dom": "^19.2.6",
+    "sql.js": "^1.10.3",
+    "uuid": "^9.0.0",
+    "ws": "^8.16.0"
+  }
+}
