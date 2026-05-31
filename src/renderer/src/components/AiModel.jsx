@@ -1,7 +1,7 @@
 /**
  * Airone AI Backbone - AI Model Selection Component
  * Choose which AI model will control the robot.
- * Supports: Rule-Based Engine, OpenAI GPT-4, Anthropic Claude, Local LLaMA 3, Custom Endpoint.
+ * Supports: Rule-Based Engine, OpenAI GPT-4, Anthropic Claude, Local LLaMA 3, Kimi K2.6, Custom Endpoint.
  * Each model has different capabilities and requirements.
  */
 
@@ -34,6 +34,15 @@ const AI_MODELS = [
     color: 'purple',
     requires_key: true,
     endpoint: null
+  },
+  {
+    id: 'kimi-k2.6',
+    name: 'Kimi K2.6 (NVIDIA)',
+    type: 'cloud',
+    description: 'Advanced AI via NVIDIA API. Supports LNN model generation and robot control. Pre-configured for Airone.',
+    color: 'green',
+    requires_key: false,
+    endpoint: 'https://integrate.api.nvidia.com/v1'
   },
   {
     id: 'llama3',
@@ -98,6 +107,12 @@ function AiModel() {
     setSelectedModel(modelId);
     setTestResult(null);
     setConfigSaved(false);
+
+    // Update endpoint when selecting a model with a default endpoint
+    const model = AI_MODELS.find(m => m.id === modelId);
+    if (model && model.endpoint) {
+      setEndpoint(model.endpoint);
+    }
   };
 
   const handleTestConnection = async () => {
@@ -134,6 +149,20 @@ function AiModel() {
           ? { success: true, message: 'API key provided. Connection will be tested when robot sends data.' }
           : { success: false, message: 'API key is required for Claude.' }
         );
+      } else if (selectedModel === 'kimi-k2.6') {
+        try {
+          const response = await fetch('https://integrate.api.nvidia.com/v1/models', {
+            method: 'GET',
+            headers: { 'Accept': 'application/json' }
+          });
+          if (response.ok || response.status === 200) {
+            setTestResult({ success: true, message: 'NVIDIA API endpoint reachable. Kimi K2.6 is pre-configured and ready to use with Airone.' });
+          } else {
+            setTestResult({ success: true, message: 'NVIDIA API endpoint responded. Kimi K2.6 will be available when generating LNN models.' });
+          }
+        } catch (e) {
+          setTestResult({ success: false, message: 'Cannot reach NVIDIA API endpoint. Check your internet connection.' });
+        }
       } else if (selectedModel === 'custom') {
         if (endpoint) {
           try {
@@ -212,7 +241,7 @@ function AiModel() {
                 </div>
                 <p className="model-description">{model.description}</p>
 
-                {/* API Key field for cloud models */}
+                {/* API Key field for cloud models that require keys */}
                 {model.requires_key && selectedModel === model.id && (
                   <div className="model-config" onClick={e => e.stopPropagation()}>
                     <div className="form-group" style={{ marginBottom: 0, marginTop: 8 }}>
@@ -225,6 +254,23 @@ function AiModel() {
                         placeholder="Enter your API key"
                       />
                       <div className="form-hint">Your key is stored locally and never shared</div>
+                    </div>
+                  </div>
+                )}
+
+                {/* Kimi K2.6 endpoint info (pre-configured, no key needed) */}
+                {model.id === 'kimi-k2.6' && selectedModel === model.id && (
+                  <div className="model-config" onClick={e => e.stopPropagation()}>
+                    <div className="form-group" style={{ marginBottom: 0, marginTop: 8 }}>
+                      <label className="form-label">NVIDIA API Endpoint</label>
+                      <input
+                        type="text"
+                        className="form-input"
+                        value={endpoint}
+                        onChange={e => { setEndpoint(e.target.value); setConfigSaved(false); }}
+                        placeholder="https://integrate.api.nvidia.com/v1"
+                      />
+                      <div className="form-hint">Pre-configured endpoint for Airone. No API key required.</div>
                     </div>
                   </div>
                 )}

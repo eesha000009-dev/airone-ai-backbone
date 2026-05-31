@@ -22,10 +22,12 @@ const DEFAULT_PINS = [
 function HardwareMap() {
   const [pins, setPins] = useState([]);
   const [robotId, setRobotId] = useState(null);
+  const [robotData, setRobotData] = useState(null);
   const [syncing, setSyncing] = useState(false);
   const [importing, setImporting] = useState(false);
   const [error, setError] = useState(null);
   const [success, setSuccess] = useState(null);
+  const [existingModel, setExistingModel] = useState(null);
 
   useEffect(() => {
     loadData();
@@ -37,8 +39,21 @@ function HardwareMap() {
       if (robots && robots.length > 0) {
         const first = robots[0];
         setRobotId(first.id);
+        setRobotData(first);
         const result = await window.aironeAPI.getPins(first.id);
         setPins(result || []);
+
+        // Check for existing LNN model
+        if (window.aironeAPI.getLatestLnnModel) {
+          try {
+            const model = await window.aironeAPI.getLatestLnnModel(first.id);
+            if (model) {
+              setExistingModel(model);
+            }
+          } catch (e) {
+            // Model check not available, that's fine
+          }
+        }
       }
     } catch (e) {
       console.error('Failed to load data:', e);
@@ -61,9 +76,10 @@ function HardwareMap() {
     if (!robotId) return;
     setSyncing(true);
     setError(null);
+    setSuccess(null);
     try {
       await window.aironeAPI.syncPins(robotId, DEFAULT_PINS);
-      setSuccess(true);
+      setSuccess('Default ESP32 pins loaded successfully!');
       setError(null);
       const result = await window.aironeAPI.getPins(robotId);
       setPins(result || []);
@@ -77,14 +93,35 @@ function HardwareMap() {
   const handleImportAiro = async () => {
     setImporting(true);
     setError(null);
+    setSuccess(null);
     try {
       const result = await window.aironeAPI.openAiroFile();
       if (result && result.pins && result.pins.length > 0) {
+        // Normalize pins from parser result
+        const normalizedPins = result.pins.map(p => ({
+          name: p.name || p.pin_name,
+          number: p.number || p.pin_number,
+          mode: p.mode || 'output',
+          description: p.description || ''
+        }));
+
         if (robotId) {
-          await window.aironeAPI.syncPins(robotId, result.pins);
+          await window.aironeAPI.syncPins(robotId, normalizedPins);
           const updated = await window.aironeAPI.getPins(robotId);
           setPins(updated || []);
-          setSuccess(true);
+          setSuccess(`✓ ${normalizedPins.length} pins imported from .airo file`);
+        }
+
+        // If robotName exists and current robot has no name, update it
+        if (result.robotName && robotId && robotData) {
+          if (!robotData.name || robotData.name.trim() === '') {
+            try {
+              await window.aironeAPI.updateRobot(robotId, { name: result.robotName });
+              setRobotData(prev => ({ ...prev, name: result.robotName }));
+            } catch (e) {
+              console.warn('Failed to update robot name:', e);
+            }
+          }
         }
       } else if (result) {
         setError('No pin definitions found in the .airo file.');
@@ -115,6 +152,9 @@ function HardwareMap() {
           <line x1="1" y1="14" x2="4" y2="14" />
         </svg>
         <h2>Hardware Map</h2>
+        {existingModel && (
+          <span className="lnn-badge chip chip-green">LNN Model Exists</span>
+        )}
       </div>
 
       {pins.length > 0 && (
@@ -135,11 +175,11 @@ function HardwareMap() {
       )}
 
       <div className="hw-actions">
-        <button className="btn btn-secondary" onClick={handleSyncDefault} disabled={syncing}>
-          {syncing ? 'Syncing...' : 'Sync Default ESP32 Pins'}
-        </button>
-        <button className="btn btn-secondary" onClick={handleImportAiro} disabled={importing}>
+        <button className="btn btn-primary" onClick={handleImportAiro} disabled={importing}>
           {importing ? 'Importing...' : 'Import from .airo File'}
+        </button>
+        <button className="btn btn-secondary" onClick={handleSyncDefault} disabled={syncing}>
+          {syncing ? 'Syncing...' : 'Load ESP32 Defaults'}
         </button>
       </div>
 
@@ -192,11 +232,16 @@ function HardwareMap() {
       ) : (
         <div className="card">
           <div className="alert alert-info">
-            No pins configured yet. Click "Sync Default ESP32 Pins" to load the default pin configuration,
-            or "Import from .airo File" to extract pins from your robot code.
+            No pins configured yet. Click "Import from .airo File" to extract pins from your robot code,
+            or "Load ESP32 Defaults" to use the default pin configuration.
           </div>
         </div>
       )}
+
+      {/* AI Chat integration note */}
+      <div className="alert alert-info" style={{ marginTop: 16 }}>
+        These pin definitions will be sent to the AI Chat for model generation.
+      </div>
 
       {error && (
         <div className="alert alert-error" style={{ marginTop: 16 }}>
@@ -205,7 +250,7 @@ function HardwareMap() {
       )}
       {success && (
         <div className="alert alert-success" style={{ marginTop: 16 }}>
-          ✓ Pin configuration synced successfully!
+          {success}
         </div>
       )}
     </div>

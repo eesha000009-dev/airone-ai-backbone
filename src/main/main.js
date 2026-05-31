@@ -10,6 +10,8 @@ const path = require('path');
 const fs = require('fs');
 const db = require('./database');
 const brainServer = require('./brain-server');
+const nvidiaClient = require('./nvidia-client');
+const renderClient = require('./render-client');
 
 let mainWindow = null;
 
@@ -147,9 +149,9 @@ async function handleOpenAiroFile() {
   
   const filePath = result.filePaths[0];
   const content = fs.readFileSync(filePath, 'utf-8');
-  const pins = db.parseAiroPins(content);
+  const { pins, robotName } = db.parseAiroPins(content);
   
-  return { filePath, content, pins };
+  return { filePath, content, pins, robotName };
 }
 
 // ==================== IPC HANDLERS ====================
@@ -195,7 +197,8 @@ function setupIpcHandlers() {
 
   ipcMain.handle('file:parseAiro', async (_event, filePath) => {
     const content = fs.readFileSync(filePath, 'utf-8');
-    return { content, pins: db.parseAiroPins(content) };
+    const { pins, robotName } = db.parseAiroPins(content);
+    return { content, pins, robotName };
   });
 
   // ---- Command Log Operations ----
@@ -240,6 +243,132 @@ function setupIpcHandlers() {
   // ---- File Operations ----
   ipcMain.handle('file:openAiro', async () => {
     return handleOpenAiroFile();
+  });
+
+  // ---- AI Chat Operations ----
+  ipcMain.handle('ai:sendChat', async (_event, { robotId, messages, pins, robotData }) => {
+    try {
+      // Save user message(s) to chat history
+      for (const msg of messages) {
+        if (msg.role === 'user') {
+          db.saveChatMessage(robotId, 'user', msg.content);
+        }
+      }
+
+      // Call NVIDIA API for chat completion
+      const assistantContent = await nvidiaClient.sendChatCompletion({
+        messages,
+        model: robotData?.ai_model
+      });
+
+      // Save assistant message to chat history
+      db.saveChatMessage(robotId, 'assistant', assistantContent);
+
+      return { content: assistantContent, role: 'assistant' };
+    } catch (err) {
+      console.error('[Main] AI chat error:', err.message);
+      throw new Error(`AI chat failed: ${err.message}`);
+    }
+  });
+
+  ipcMain.handle('ai:generateLnnModel', async (_event, { robotId, robotData, pins, messages }) => {
+    try {
+      // Call NVIDIA API for LNN model generation
+      const modelConfig = await nvidiaClient.generateLnnModel({
+        robotData,
+        pins,
+        conversationHistory: messages || []
+      });
+
+      // Save the model to database
+      const savedModel = db.saveLnnModel(robotId, modelConfig);
+
+      return { modelConfig, modelId: savedModel.id };
+    } catch (err) {
+      console.error('[Main] LNN generation error:', err.message);
+      throw new Error(`LNN model generation failed: ${err.message}`);
+    }
+  });
+
+  ipcMain.handle('ai:getChatHistory', async (_event, robotId) => {
+    return db.getChatHistory(robotId);
+  });
+
+  ipcMain.handle('ai:clearChatHistory', async (_event, robotId) => {
+    return db.clearChatHistory(robotId);
+  });
+
+  // ---- Deploy Operations ----
+  ipcMain.handle('deploy:brainService', async (_event, { robotId, modelConfig }) => {
+    try {
+      // Get robot data for the service name
+      const robot = db.getRobot(robotId);
+      if (!robot) {
+        throw new Error('Robot not found');
+      }
+
+      // Update model status to 'deploying'
+      const latestModel = db.getLatestLnnModel(robotId);
+      if (latestModel) {
+        db.updateLnnModelStatus(latestModel.id, 'deploying');
+      }
+
+      // Deploy to Render
+      const deployResult = await renderClient.deployBrainService({
+        robotId,
+        robotName: robot.name,
+        modelConfig
+      });
+
+      // Update model status and deployment info in database
+      if (latestModel) {
+        db.updateLnnModelStatus(
+          latestModel.id,
+          'deployed',
+          deployResult.brain_url,
+          deployResult.api_key,
+          deployResult.service_id
+        );
+      }
+
+      // Update robot with brain URL and API key
+      db.updateRobot(robotId, {
+        brain_url: deployResult.brain_url,
+        api_key: deployResult.api_key
+      });
+
+      return {
+        brain_url: deployResult.brain_url,
+        api_key: deployResult.api_key,
+        service_id: deployResult.service_id
+      };
+    } catch (err) {
+      // Update model status to 'failed' if deploy fails
+      const latestModel = db.getLatestLnnModel(robotId);
+      if (latestModel) {
+        db.updateLnnModelStatus(latestModel.id, 'failed');
+      }
+      console.error('[Main] Deploy error:', err.message);
+      throw new Error(`Brain service deployment failed: ${err.message}`);
+    }
+  });
+
+  ipcMain.handle('deploy:getStatus', async (_event, serviceId) => {
+    try {
+      return await renderClient.getServiceStatus(serviceId);
+    } catch (err) {
+      console.error('[Main] Get deploy status error:', err.message);
+      throw new Error(`Failed to get deploy status: ${err.message}`);
+    }
+  });
+
+  // ---- LNN Model Operations ----
+  ipcMain.handle('db:getLnnModels', async (_event, robotId) => {
+    return db.getLnnModels(robotId);
+  });
+
+  ipcMain.handle('db:getLatestLnnModel', async (_event, robotId) => {
+    return db.getLatestLnnModel(robotId);
   });
 }
 

@@ -48,6 +48,23 @@ contextBridge.exposeInMainWorld('aironeAPI', {
   
   openAiroFile: () => ipcRenderer.invoke('file:openAiro'),
 
+  // ==================== AI CHAT OPERATIONS ====================
+
+  sendAiChat: (params) => ipcRenderer.invoke('ai:sendChat', params),
+  generateLnnModel: (params) => ipcRenderer.invoke('ai:generateLnnModel', params),
+  getChatHistory: (robotId) => ipcRenderer.invoke('ai:getChatHistory', robotId),
+  clearChatHistory: (robotId) => ipcRenderer.invoke('ai:clearChatHistory', robotId),
+
+  // ==================== DEPLOY OPERATIONS ====================
+
+  deployBrainService: (params) => ipcRenderer.invoke('deploy:brainService', params),
+  getDeployStatus: (serviceId) => ipcRenderer.invoke('deploy:getStatus', serviceId),
+
+  // ==================== LNN MODEL OPERATIONS ====================
+
+  getLnnModels: (robotId) => ipcRenderer.invoke('db:getLnnModels', robotId),
+  getLatestLnnModel: (robotId) => ipcRenderer.invoke('db:getLatestLnnModel', robotId),
+
   // ==================== EVENT LISTENERS ====================
   
   onBrainEvent: (callback) => {
