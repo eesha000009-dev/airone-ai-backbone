@@ -72,10 +72,17 @@ function AiChat() {
           const accuracyText = progressData.accuracy
             ? ` Accuracy: ${(progressData.accuracy * 100).toFixed(1)}%`
             : '';
+          const accuracyWarning = progressData.accuracy && progressData.accuracy < 0.6
+            ? '\n\n⚠️ Training accuracy is below 60%. A rule-based fallback will be used on the brain server to ensure reliable behavior.'
+            : '';
+          const trainingInfo = progressData.config?.training_info;
+          const trainingDetails = trainingInfo
+            ? `\nTraining: ${trainingInfo.epochs || 'N/A'} epochs, ${trainingInfo.training_examples || 'N/A'} examples, loss=${trainingInfo.final_loss?.toFixed(4) || 'N/A'}`
+            : '';
           const assistantMessage = {
             id: Date.now().toString(),
             role: 'assistant',
-            content: `⚡ LNN Model Generated & Trained!${accuracyText}\n\nModel ID: ${progressData.model_id || 'N/A'}\nThe model has been trained with synthetic data and verified.\n\nClick "Deploy to Cloud" to make it available for your robot.`,
+            content: `⚡ LNN Model Generated & Trained!${accuracyText}${accuracyWarning}${trainingDetails}\n\nModel ID: ${progressData.model_id || 'N/A'}\nThe model has been trained with synthetic data and verified.\n\nClick "Deploy to Cloud" to make it available for your robot.`,
             timestamp: new Date().toISOString()
           };
           setMessages(prev => [...prev, assistantMessage]);
@@ -220,9 +227,9 @@ function AiChat() {
           try { await window.aironeAPI.updateRobot(robotId, { brain_url: result.brain_url }); } catch (_e) { }
         }
 
-        const wsUrl = result.brain_url.replace('https://', 'wss://').replace('http://', 'ws://');
+        const wsUrl = result.ws_url || result.brain_url.replace('https://', 'wss://').replace('http://', 'ws://');
         const multiModelNote = result.multi_model
-          ? `\n\nMulti-model: ${result.total_robots} robot(s) sharing this brain service.\nConnect via: wss://airone-brain-template.onrender.com/?robot=${result.robot_key || 'your-robot-name'}`
+          ? `\n\nMulti-model: ${result.total_robots} robot(s) sharing this brain service.\nConnect via: ${wsUrl}?robot=${result.robot_key || 'your-robot-name'}`
           : '';
         const assistantMessage = {
           id: Date.now().toString(),
@@ -325,7 +332,7 @@ function AiChat() {
         {robotData?.type && <><span className="context-divider">|</span><span className="context-robot-type">{robotData.type}</span></>}
         <span className="context-divider">|</span>
         <span className="context-pin-count">{pins.length} pins ({inputPinCount} in / {outputPinCount} out)</span>
-        {generateStatus === 'ready' && <><span className="context-divider">|</span><span className="chip chip-green">LNN Trained</span></>}
+        {generateStatus === 'ready' && <><span className="context-divider">|</span><span className="chip chip-green">LNN Trained{generateProgress?.accuracy ? ` (${(generateProgress.accuracy * 100).toFixed(0)}%)` : ''}</span></>}
         {deployStatus === 'deployed' && <><span className="context-divider">|</span><span className="chip chip-cyan">Deployed</span></>}
       </div>
 
@@ -377,7 +384,9 @@ function AiChat() {
                   <span className="progress-text">{getProgressPercent()}%</span>
                 </div>
                 {generateProgress.accuracy !== undefined && (
-                  <div className="progress-accuracy">Training accuracy: {(generateProgress.accuracy * 100).toFixed(1)}%</div>
+                  <div className="progress-accuracy" style={{ color: generateProgress.accuracy >= 0.6 ? '#34d399' : generateProgress.accuracy >= 0.4 ? '#fbbf24' : '#f87171' }}>
+                    Training accuracy: {(generateProgress.accuracy * 100).toFixed(1)}%{generateProgress.accuracy < 0.6 ? ' (rule-based fallback will be used)' : ''}
+                  </div>
                 )}
               </div>
             </div>

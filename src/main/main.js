@@ -215,7 +215,8 @@ function setupIpcHandlers() {
         model_id: result.modelId || `lnn-${Date.now()}`,
         config: result.modelConfig,
         accuracy: result.accuracy,
-        verification: result.verification
+        verification: result.verification,
+        training_info: result.modelConfig?.training_info || null
       };
     } catch (err) {
       console.error('[Main] LNN generation pipeline error:', err.message);
@@ -244,7 +245,8 @@ function setupIpcHandlers() {
           status: 'generated',
           model_id: savedModel.id,
           config: modelConfig,
-          accuracy: null
+          accuracy: null,
+          training_info: null
         };
       } catch (e2) {
         throw new Error(`Generation failed: ${err.message}`);
@@ -264,11 +266,33 @@ function setupIpcHandlers() {
       const latestModel = db.getLatestLnnModel(robotId);
       if (latestModel) db.updateLnnModelStatus(latestModel.id, 'deploying');
 
+      // Get the model config to deploy - prefer passed config, then latest from DB
+      let configToDeploy = modelConfig || (latestModel?.model_config);
+      if (!configToDeploy) throw new Error('No model config available to deploy');
+
+      // Ensure output_types is present in the config
+      if (configToDeploy.input_size !== undefined && (!configToDeploy.output_types || Object.keys(configToDeploy.output_types).length === 0)) {
+        // Infer output_types from output_mapping keys
+        const outputTypes = {};
+        for (const name of Object.keys(configToDeploy.output_mapping || {})) {
+          const desc = (name || '').toLowerCase();
+          if (desc.includes('motor') || desc.includes('speed') || desc.includes('pwm')) {
+            outputTypes[name] = 'pwm';
+          } else if (desc.includes('servo') || desc.includes('angle') || desc.includes('arm') || desc.includes('hand') || desc.includes('leg')) {
+            outputTypes[name] = 'servo';
+          } else {
+            outputTypes[name] = 'digital';
+          }
+        }
+        configToDeploy.output_types = outputTypes;
+        console.log('[Main] Inferred output_types for deploy:', JSON.stringify(outputTypes));
+      }
+
       // Deploy to the existing brain-template service (multi-model)
       const deployResult = await renderClient.deployBrainService({
         robotId,
         robotName: robot.name,
-        modelConfig: modelConfig || (latestModel?.model_config)
+        modelConfig: configToDeploy
       });
 
       if (latestModel) {

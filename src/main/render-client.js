@@ -58,6 +58,33 @@ async function getCurrentModelConfig() {
 }
 
 /**
+ * Infer output_types from pin descriptions if not already set in the model config.
+ * @param {Object} modelConfig - LNN model configuration
+ * @param {Object} outputMapping - Mapping of output pin names to indices
+ * @returns {Object} The modelConfig with output_types populated
+ */
+function ensureOutputTypes(modelConfig, outputMapping) {
+  if (modelConfig.output_types && Object.keys(modelConfig.output_types).length > 0) {
+    return modelConfig; // Already has output_types
+  }
+
+  const outputTypes = {};
+  for (const name of Object.keys(outputMapping || {})) {
+    const desc = (name || '').toLowerCase();
+    if (desc.includes('motor') || desc.includes('speed') || desc.includes('pwm')) {
+      outputTypes[name] = 'pwm';
+    } else if (desc.includes('servo') || desc.includes('angle') || desc.includes('arm') || desc.includes('hand') || desc.includes('leg')) {
+      outputTypes[name] = 'servo';
+    } else {
+      outputTypes[name] = 'digital';
+    }
+  }
+  modelConfig.output_types = outputTypes;
+  console.log(`[RenderClient] Inferred output_types: ${JSON.stringify(outputTypes)}`);
+  return modelConfig;
+}
+
+/**
  * Deploy a brain model to the existing brain-template service (multi-model).
  *
  * @param {Object} params
@@ -71,6 +98,12 @@ async function deployBrainService({ robotId, robotName, modelConfig }) {
   const robotKey = (robotName || 'default').toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 
   console.log(`[RenderClient] Deploying model for robot: ${robotKey}`);
+
+  // If modelConfig itself is in single-model format (has input_size at top level),
+  // ensure it has output_types before wrapping into multi-model format
+  if (modelConfig && modelConfig.input_size !== undefined) {
+    ensureOutputTypes(modelConfig, modelConfig.output_mapping || {});
+  }
 
   // Get current multi-model config
   let multiModelConfig = {};
@@ -86,6 +119,8 @@ async function deployBrainService({ robotId, robotName, modelConfig }) {
     const existingName = multiModelConfig._robot_name || 'default';
     const singleConfig = { ...multiModelConfig };
     delete singleConfig._robot_name;
+    // Ensure output_types on existing config too
+    ensureOutputTypes(singleConfig, singleConfig.output_mapping || {});
     multiModelConfig = { [existingName]: singleConfig };
   }
 

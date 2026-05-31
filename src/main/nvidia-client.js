@@ -489,6 +489,8 @@ Output ONLY the JSON object.`;
 
 /**
  * Generate training data from behavior rules (fallback when AI is unavailable).
+ * Generates 50+ diverse scenarios with strong output signals (near 0 or 1).
+ * Includes specialized obstacle avoidance logic for side-specific motor control.
  */
 function generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robotData) {
   const inputNames = inputPins.map(p => p.name || p.pin_name);
@@ -498,92 +500,388 @@ function generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robot
 
   const trainingData = [];
 
-  // Generate 30 diverse training examples
-  for (let i = 0; i < 30; i++) {
+  // Categorize input and output pins by side/direction
+  const leftDistNames = inputNames.filter(n => {
+    const d = n.toLowerCase();
+    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('left') || d.includes('l'));
+  });
+  const rightDistNames = inputNames.filter(n => {
+    const d = n.toLowerCase();
+    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('right') || d.includes('r'));
+  });
+  const frontDistNames = inputNames.filter(n => {
+    const d = n.toLowerCase();
+    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('front') || d.includes('f') || d.includes('center'));
+  });
+  const allDistNames = inputNames.filter(n => {
+    const d = n.toLowerCase();
+    return d.includes('ultrasonic') || d.includes('distance');
+  });
+
+  const leftMotorNames = outputNames.filter(n => {
+    const d = n.toLowerCase();
+    return (d.includes('motor') || outputTypes[n] === 'pwm') && (d.includes('left') || d.includes('l'));
+  });
+  const rightMotorNames = outputNames.filter(n => {
+    const d = n.toLowerCase();
+    return (d.includes('motor') || outputTypes[n] === 'pwm') && (d.includes('right') || d.includes('r'));
+  });
+  const allMotorNames = outputNames.filter(n => {
+    const d = n.toLowerCase();
+    return d.includes('motor') || outputTypes[n] === 'pwm';
+  });
+  const servoNames = outputNames.filter(n => {
+    const d = n.toLowerCase();
+    return d.includes('servo') || d.includes('arm') || d.includes('hand') || d.includes('leg') || outputTypes[n] === 'servo';
+  });
+  const digitalNames = outputNames.filter(n => {
+    const d = n.toLowerCase();
+    return !allMotorNames.includes(n) && !servoNames.includes(n);
+  });
+
+  // Helper: generate a random value in a range
+  const randRange = (min, max) => min + Math.random() * (max - min);
+
+  // Scenario 1: Obstacle close on left -> stop left motor, full right motor, turn right (8 scenarios)
+  for (let i = 0; i < 8; i++) {
     const inputs = {};
     const expectedOutputs = {};
-
-    // Generate random sensor values
     inputNames.forEach(name => {
-      const desc = name.toLowerCase();
-      if (desc.includes('ultrasonic') || desc.includes('distance')) {
-        // Vary distance: close (0.05-0.15), medium (0.3-0.5), far (0.6-1.0)
-        const range = i < 10 ? [0.05, 0.15] : i < 20 ? [0.3, 0.5] : [0.6, 1.0];
-        inputs[name] = range[0] + Math.random() * (range[1] - range[0]);
-      } else if (desc.includes('temp')) {
-        inputs[name] = Math.random(); // 0-1 normalized
-      } else if (desc.includes('light') || desc.includes('ldr')) {
-        inputs[name] = Math.random();
-      } else if (desc.includes('pir') || desc.includes('motion')) {
-        inputs[name] = Math.random() > 0.5 ? 1.0 : 0.0;
-      } else if (desc.includes('mic') || desc.includes('sound')) {
-        inputs[name] = Math.random() * 0.8;
-      } else if (desc.includes('camera') || desc.includes('object')) {
-        inputs[name] = Math.random() > 0.6 ? 0.8 : 0.1;
+      const d = name.toLowerCase();
+      if (leftDistNames.includes(name)) {
+        inputs[name] = randRange(0.02, 0.12); // Very close on left
+      } else if (rightDistNames.includes(name)) {
+        inputs[name] = randRange(0.5, 1.0); // Clear on right
+      } else if (frontDistNames.includes(name)) {
+        inputs[name] = randRange(0.2, 0.5); // Medium front
+      } else if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.4, 0.8);
       } else {
-        inputs[name] = Math.random();
+        inputs[name] = generateDefaultSensorValue(name);
       }
     });
-
-    // Determine expected outputs based on sensor state
     outputNames.forEach(name => {
-      const desc = name.toLowerCase();
-      const outType = outputTypes[name] || 'digital';
-
-      // Check distance sensors for obstacle avoidance
-      const distanceInputs = Object.entries(inputs).filter(([k]) =>
-        k.toLowerCase().includes('ultrasonic') || k.toLowerCase().includes('distance')
-      );
-      const minDistance = distanceInputs.length > 0
-        ? Math.min(...distanceInputs.map(([, v]) => v))
-        : 1.0;
-
-      // Check temperature
-      const tempInputs = Object.entries(inputs).filter(([k]) =>
-        k.toLowerCase().includes('temp')
-      );
-      const maxTemp = tempInputs.length > 0
-        ? Math.max(...tempInputs.map(([, v]) => v))
-        : 0.3;
-
-      // Check motion
-      const motionInputs = Object.entries(inputs).filter(([k]) =>
-        k.toLowerCase().includes('pir') || k.toLowerCase().includes('motion')
-      );
-      const hasMotion = motionInputs.some(([, v]) => v > 0.5);
-
-      if (desc.includes('motor') || outType === 'pwm') {
-        if (minDistance < 0.15) {
-          expectedOutputs[name] = 0.0; // Stop motor when obstacle close
-        } else if (minDistance < 0.3) {
-          expectedOutputs[name] = 0.3; // Slow down
-        } else {
-          expectedOutputs[name] = 0.7; // Normal speed
-        }
-      } else if (desc.includes('servo') || desc.includes('arm') || desc.includes('hand') || desc.includes('leg') || outType === 'servo') {
-        if (minDistance < 0.15) {
-          expectedOutputs[name] = 0.75; // Turn away (135°)
-        } else if (hasMotion) {
-          expectedOutputs[name] = 0.5; // Center position
-        } else {
-          expectedOutputs[name] = 0.3 + Math.random() * 0.4; // Random normal position
-        }
+      if (leftMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.0; // Stop left motor
+      } else if (rightMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.8 + Math.random() * 0.2; // Full right motor
+      } else if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.9; // Full speed away
+      } else if (servoNames.includes(name)) {
+        expectedOutputs[name] = 0.8; // Turn away right
       } else {
-        // Digital output (LED, relay, etc.)
-        if (maxTemp > 0.7 || minDistance < 0.1) {
-          expectedOutputs[name] = 1.0; // Turn on warning
-        } else if (hasMotion) {
-          expectedOutputs[name] = 1.0; // Turn on when motion
-        } else {
-          expectedOutputs[name] = 0.0; // Off by default
-        }
+        expectedOutputs[name] = 0.0; // Off
       }
     });
-
     trainingData.push({ inputs, expected_outputs: expectedOutputs });
   }
 
+  // Scenario 2: Obstacle close on right -> stop right motor, full left motor, turn left (8 scenarios)
+  for (let i = 0; i < 8; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (rightDistNames.includes(name)) {
+        inputs[name] = randRange(0.02, 0.12); // Very close on right
+      } else if (leftDistNames.includes(name)) {
+        inputs[name] = randRange(0.5, 1.0); // Clear on left
+      } else if (frontDistNames.includes(name)) {
+        inputs[name] = randRange(0.2, 0.5); // Medium front
+      } else if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.4, 0.8);
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (rightMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.0; // Stop right motor
+      } else if (leftMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.8 + Math.random() * 0.2; // Full left motor
+      } else if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.9; // Full speed away
+      } else if (servoNames.includes(name)) {
+        expectedOutputs[name] = 0.2; // Turn away left
+      } else {
+        expectedOutputs[name] = 0.0; // Off
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 3: Obstacle very close in front -> both motors stop, reverse (6 scenarios)
+  for (let i = 0; i < 6; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (frontDistNames.includes(name)) {
+        inputs[name] = randRange(0.02, 0.1); // Very close in front
+      } else if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.05, 0.15); // Also close
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.0; // Stop all motors
+      } else if (servoNames.includes(name)) {
+        expectedOutputs[name] = 0.5 + (Math.random() > 0.5 ? 0.3 : -0.3); // Turn sharply
+      } else {
+        expectedOutputs[name] = 1.0; // Warning on
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 4: Clear path -> full speed forward (8 scenarios)
+  for (let i = 0; i < 8; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.6, 1.0); // Far / clear
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.7 + Math.random() * 0.3; // Full speed
+      } else if (servoNames.includes(name)) {
+        expectedOutputs[name] = 0.5; // Center
+      } else {
+        expectedOutputs[name] = 0.0; // Off
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 5: Medium distance -> slow approach (6 scenarios)
+  for (let i = 0; i < 6; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.25, 0.45); // Medium distance
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.3 + Math.random() * 0.15; // Slow
+      } else if (servoNames.includes(name)) {
+        expectedOutputs[name] = 0.5; // Center
+      } else {
+        expectedOutputs[name] = 0.0;
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 6: Edge cases - very close on both sides (4 scenarios)
+  for (let i = 0; i < 4; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.02, 0.1); // Very close everywhere
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.0; // Full stop - trapped
+      } else if (servoNames.includes(name)) {
+        expectedOutputs[name] = 0.5; // Center - no good direction
+      } else {
+        expectedOutputs[name] = 1.0; // Warning
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 7: High temperature -> slow down + warning (4 scenarios)
+  for (let i = 0; i < 4; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (d.includes('temp')) {
+        inputs[name] = randRange(0.75, 1.0); // Hot
+      } else if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.5, 1.0);
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.15 + Math.random() * 0.1; // Minimal speed
+      } else if (digitalNames.includes(name)) {
+        expectedOutputs[name] = 1.0; // Warning LED
+      } else {
+        expectedOutputs[name] = 0.0;
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 8: Motion detected -> alert (4 scenarios)
+  for (let i = 0; i < 4; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (d.includes('pir') || d.includes('motion')) {
+        inputs[name] = 1.0; // Motion detected
+      } else if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.4, 0.8);
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.4 + Math.random() * 0.2; // Approach slowly
+      } else if (digitalNames.includes(name)) {
+        expectedOutputs[name] = 1.0; // Alert on
+      } else if (servoNames.includes(name)) {
+        expectedOutputs[name] = 0.5; // Center
+      } else {
+        expectedOutputs[name] = 0.0;
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 9: Dark environment (low light) -> turn on lights (4 scenarios)
+  for (let i = 0; i < 4; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      const d = name.toLowerCase();
+      if (d.includes('light') || d.includes('ldr')) {
+        inputs[name] = randRange(0.0, 0.15); // Dark
+      } else if (d.includes('ultrasonic') || d.includes('distance')) {
+        inputs[name] = randRange(0.5, 1.0); // Clear
+      } else {
+        inputs[name] = generateDefaultSensorValue(name);
+      }
+    });
+    outputNames.forEach(name => {
+      if (digitalNames.includes(name)) {
+        const nd = name.toLowerCase();
+        if (nd.includes('led') || nd.includes('light') || nd.includes('lamp')) {
+          expectedOutputs[name] = 1.0; // Turn on light
+        } else {
+          expectedOutputs[name] = 0.0;
+        }
+      } else if (allMotorNames.includes(name)) {
+        expectedOutputs[name] = 0.3 + Math.random() * 0.15; // Cautious speed
+      } else {
+        expectedOutputs[name] = 0.0;
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  // Scenario 10: Random diverse scenarios to fill out (remaining to reach 55+)
+  const remaining = Math.max(5, 55 - trainingData.length);
+  for (let i = 0; i < remaining; i++) {
+    const inputs = {};
+    const expectedOutputs = {};
+    inputNames.forEach(name => {
+      inputs[name] = generateDefaultSensorValue(name);
+    });
+    // Compute outputs based on overall sensor state
+    const distEntries = Object.entries(inputs).filter(([k]) => {
+      const d = k.toLowerCase();
+      return d.includes('ultrasonic') || d.includes('distance');
+    });
+    const minDist = distEntries.length > 0 ? Math.min(...distEntries.map(([, v]) => v)) : 1.0;
+    const tempEntries = Object.entries(inputs).filter(([k]) => k.toLowerCase().includes('temp'));
+    const maxTemp = tempEntries.length > 0 ? Math.max(...tempEntries.map(([, v]) => v)) : 0.3;
+    const motionEntries = Object.entries(inputs).filter(([k]) =>
+      k.toLowerCase().includes('pir') || k.toLowerCase().includes('motion'));
+    const hasMotion = motionEntries.some(([, v]) => v > 0.5);
+
+    outputNames.forEach(name => {
+      const outType = outputTypes[name] || 'digital';
+      if (allMotorNames.includes(name) || outType === 'pwm') {
+        if (minDist < 0.12) {
+          expectedOutputs[name] = 0.0;
+        } else if (minDist < 0.25) {
+          expectedOutputs[name] = 0.15 + Math.random() * 0.1;
+        } else if (minDist < 0.45) {
+          expectedOutputs[name] = 0.35 + Math.random() * 0.15;
+        } else {
+          expectedOutputs[name] = 0.7 + Math.random() * 0.3;
+        }
+      } else if (servoNames.includes(name) || outType === 'servo') {
+        if (minDist < 0.15) {
+          expectedOutputs[name] = Math.random() > 0.5 ? 0.85 : 0.15; // Sharp turn
+        } else {
+          expectedOutputs[name] = 0.4 + Math.random() * 0.2; // Near center
+        }
+      } else {
+        if (maxTemp > 0.75 || minDist < 0.1) {
+          expectedOutputs[name] = 1.0;
+        } else if (hasMotion) {
+          expectedOutputs[name] = 1.0;
+        } else {
+          expectedOutputs[name] = 0.0;
+        }
+      }
+    });
+    trainingData.push({ inputs, expected_outputs: expectedOutputs });
+  }
+
+  console.log(`[NvidiaClient] Generated ${trainingData.length} training examples from rules`);
   return { training_data: trainingData };
+}
+
+/**
+ * Generate a default sensor value based on sensor name.
+ * Produces varied but realistic values for training diversity.
+ */
+function generateDefaultSensorValue(name) {
+  const d = (name || '').toLowerCase();
+  if (d.includes('ultrasonic') || d.includes('distance')) {
+    // Produce values across the full range with bias toward extremes
+    const r = Math.random();
+    if (r < 0.3) return 0.02 + Math.random() * 0.1;  // Close
+    if (r < 0.5) return 0.2 + Math.random() * 0.2;   // Medium
+    return 0.6 + Math.random() * 0.4;                  // Far
+  } else if (d.includes('temp')) {
+    return Math.random();
+  } else if (d.includes('light') || d.includes('ldr')) {
+    const r = Math.random();
+    if (r < 0.3) return 0.05 + Math.random() * 0.15;  // Dark
+    if (r < 0.6) return 0.3 + Math.random() * 0.3;    // Medium
+    return 0.7 + Math.random() * 0.3;                   // Bright
+  } else if (d.includes('pir') || d.includes('motion')) {
+    return Math.random() > 0.5 ? 1.0 : 0.0;
+  } else if (d.includes('mic') || d.includes('sound')) {
+    const r = Math.random();
+    if (r < 0.5) return 0.0;        // Silence
+    if (r < 0.8) return 0.4 + Math.random() * 0.2;  // Moderate
+    return 0.8 + Math.random() * 0.2; // Loud
+  } else if (d.includes('camera') || d.includes('object')) {
+    const r = Math.random();
+    if (r < 0.4) return 0.0;        // Nothing
+    if (r < 0.7) return 0.3 + Math.random() * 0.2;  // Far
+    return 0.7 + Math.random() * 0.3; // Close
+  } else {
+    return Math.random();
+  }
 }
 
 /**
@@ -592,8 +890,8 @@ function generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robot
  * Returns the model config with trained weights.
  */
 function trainLnnModel(modelConfig, trainingData, options = {}) {
-  const epochs = options.epochs || 100;
-  const learningRate = options.learningRate || 0.01;
+  const epochs = options.epochs || 300;
+  const learningRate = options.learningRate || 0.02;
   const hiddenUnits = modelConfig.hidden_units || 16;
   const inputSize = modelConfig.input_size;
   const outputSize = modelConfig.output_size;
@@ -971,13 +1269,13 @@ async function generateAndTrainLnn({ robotData, pins, conversationHistory }, pro
   emit('creating_data', 40, `Generated ${trainingData.length} training examples`);
 
   // Step 3: Train LNN
-  emit('training', 45, 'Training LNN (epoch 0/100)...');
+  emit('training', 45, 'Training LNN (epoch 0/300)...');
   const trainResult = trainLnnModel(modelConfig, trainingData, {
-    epochs: 100,
-    learningRate: 0.01,
+    epochs: 300,
+    learningRate: 0.02,
     onProgress: (epoch, loss, accuracy) => {
-      const progress = 45 + Math.round((epoch / 100) * 35);
-      emit('training', progress, `Training LNN (epoch ${epoch}/100, loss=${loss.toFixed(4)})`, { accuracy });
+      const progress = 45 + Math.round((epoch / 300) * 35);
+      emit('training', progress, `Training LNN (epoch ${epoch}/300, loss=${loss.toFixed(4)})`, { accuracy });
     }
   });
   emit('training', 80, `Training complete: accuracy ${(trainResult.accuracy * 100).toFixed(1)}%`, { accuracy: trainResult.accuracy });

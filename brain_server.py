@@ -161,18 +161,23 @@ class LiquidNeuralNetwork:
             if idx < len(raw_outputs):
                 raw_val = raw_outputs[idx]
                 out_type = self.output_types.get(name, 'digital')
-                command = self._format_output(name, raw_val, out_type)
+                command = self._format_output(name, raw_val)
                 commands[name] = command
 
         return commands
 
-    def _format_output(self, name, raw_val, out_type):
-        """Format raw output (0-1) into appropriate command format."""
-        if out_type == 'pwm' or out_type == 'motor':
+    def _format_output(self, name, raw_val, out_type=None):
+        """Format raw output (0-1) into appropriate command format.
+        Checks output_types from config first, then falls back to out_type parameter.
+        """
+        # Prefer output_types from the model config over the passed parameter
+        effective_type = self.output_types.get(name, out_type) or 'digital'
+
+        if effective_type == 'pwm' or effective_type == 'motor':
             pwm_value = int(raw_val * 255)
             pwm_value = max(0, min(255, pwm_value))
             return {"action": "pwm", "value": pwm_value}
-        elif out_type == 'servo':
+        elif effective_type == 'servo':
             angle = int(raw_val * 180)
             angle = max(0, min(180, angle))
             return {"action": "servo", "angle": angle}
@@ -185,11 +190,91 @@ class LiquidNeuralNetwork:
         self.hidden_state = [0.0] * self.hidden_units
 
 
+class RuleBasedFallback:
+    """Rule-based fallback controller when LNN training accuracy is too low (< 0.6).
+    Uses simple if-then rules derived from the model's behavior_rules config.
+    """
+
+    def __init__(self, config):
+        self.config = config
+        self.input_mapping = config.get('input_mapping', {})
+        self.output_mapping = config.get('output_mapping', {})
+        self.output_types = config.get('output_types', {})
+        self.rules = config.get('behavior_rules', [])
+        self.output_reverse = {v: k for k, v in self.output_mapping.items()}
+
+    def forward(self, inputs):
+        """Apply rules to generate output commands."""
+        if isinstance(inputs, dict):
+            sensor_data = inputs
+        else:
+            sensor_data = {}
+
+        # Start with default outputs (all off)
+        default_outputs = {}
+        for name, idx in self.output_mapping.items():
+            out_type = self.output_types.get(name, 'digital')
+            if out_type in ('pwm', 'motor'):
+                default_outputs[name] = 0.7  # Default moderate speed
+            elif out_type == 'servo':
+                default_outputs[name] = 0.5  # Center position
+            else:
+                default_outputs[name] = 0.0  # Off
+
+        outputs = dict(default_outputs)
+
+        # Apply simple obstacle avoidance rules based on sensor values
+        dist_entries = [(k, v) for k, v in sensor_data.items()
+                        if isinstance(v, (int, float)) and
+                        ('ultrasonic' in k.lower() or 'distance' in k.lower())]
+
+        min_dist = min((v for _, v in dist_entries), default=1.0)
+
+        for name, idx in self.output_mapping.items():
+            out_type = self.output_types.get(name, 'digital')
+            desc = name.lower()
+
+            if out_type in ('pwm', 'motor') or 'motor' in desc:
+                if min_dist < 0.12:
+                    outputs[name] = 0.0
+                elif min_dist < 0.25:
+                    outputs[name] = 0.2
+                elif min_dist < 0.4:
+                    outputs[name] = 0.4
+                else:
+                    outputs[name] = 0.7
+            elif out_type == 'servo' or 'servo' in desc:
+                if min_dist < 0.15:
+                    outputs[name] = 0.8
+                else:
+                    outputs[name] = 0.5
+
+        # Convert to command format
+        commands = {}
+        for name, val in outputs.items():
+            if name in self.output_mapping:
+                out_type = self.output_types.get(name, 'digital')
+                if out_type in ('pwm', 'motor'):
+                    pwm_value = int(val * 255)
+                    pwm_value = max(0, min(255, pwm_value))
+                    commands[name] = {"action": "pwm", "value": pwm_value}
+                elif out_type == 'servo':
+                    angle = int(val * 180)
+                    angle = max(0, min(180, angle))
+                    commands[name] = {"action": "servo", "angle": angle}
+                else:
+                    value = 1 if val > 0.5 else 0
+                    commands[name] = {"action": "digitalwrite", "value": value}
+
+        return commands
+
+
 class MultiModelBrainServer:
     """Brain server that hosts multiple LNN models, routing by robot name."""
 
     def __init__(self):
         self.models = {}  # robot_name -> LiquidNeuralNetwork
+        self.fallbacks = {}  # robot_name -> RuleBasedFallback (when accuracy < 0.6)
         self.load_models()
 
     def load_models(self):
@@ -215,8 +300,17 @@ class MultiModelBrainServer:
             # Multi-model format: { "robot-name": {...config...}, ... }
             for robot_name, model_config in config.items():
                 if isinstance(model_config, dict) and 'input_size' in model_config:
-                    self.models[robot_name] = LiquidNeuralNetwork(model_config)
-                    logger.info(f"Loaded model for robot: {robot_name} (inputs={model_config.get('input_size')}, outputs={model_config.get('output_size')})")
+                    lnn = LiquidNeuralNetwork(model_config)
+                    self.models[robot_name] = lnn
+
+                    # Check training accuracy - use rule-based fallback if too low
+                    training_info = model_config.get('training_info', {})
+                    accuracy = training_info.get('accuracy', 1.0)
+                    if accuracy < 0.6:
+                        logger.warning(f"Robot '{robot_name}' training accuracy {accuracy:.1%} is below 0.6 threshold, enabling rule-based fallback")
+                        self.fallbacks[robot_name] = RuleBasedFallback(model_config)
+                    else:
+                        logger.info(f"Loaded model for robot: {robot_name} (inputs={model_config.get('input_size')}, outputs={model_config.get('output_size')}, accuracy={accuracy:.1%})")
 
         logger.info(f"Total models loaded: {len(self.models)}")
 
@@ -233,20 +327,33 @@ class MultiModelBrainServer:
         return None
 
     def process_message(self, robot_name, message):
-        """Process a sensor data message and return commands."""
+        """Process a sensor data message and return commands.
+        Uses rule-based fallback if LNN training accuracy was below threshold.
+        """
         model = self.get_model(robot_name)
         if not model:
             return {"error": f"No model found for robot '{robot_name}'", "output_commands": {}}
 
         parsed = self._parse_message(message)
         sensor_data = parsed.get('input_sensors_read', parsed)
-        commands = model.forward(sensor_data)
+
+        # Use rule-based fallback if accuracy was too low
+        if robot_name in self.fallbacks:
+            logger.debug(f"Using rule-based fallback for robot '{robot_name}'")
+            commands = self.fallbacks[robot_name].forward(sensor_data)
+            mode = "rule-based-fallback"
+            confidence = 0.6
+        else:
+            commands = model.forward(sensor_data)
+            mode = "lnn"
+            confidence = 0.85
 
         return {
             "output_commands": commands,
             "metadata": {
                 "robot": robot_name,
-                "confidence": 0.85,
+                "confidence": confidence,
+                "mode": mode,
                 "model_info": f"LNN ({model.input_size}in/{model.output_size}out/{model.hidden_units}hidden)"
             }
         }
@@ -309,7 +416,10 @@ async def _process_request(path, request_headers):
                     "inputs": m.input_size,
                     "outputs": m.output_size,
                     "hidden": m.hidden_units,
-                    "has_trained_weights": m.config.get('weights', {}).get('W_in') is not None
+                    "has_trained_weights": m.config.get('weights', {}).get('W_in') is not None,
+                    "output_types": m.output_types,
+                    "using_fallback": name in brain.fallbacks,
+                    "training_accuracy": m.config.get('training_info', {}).get('accuracy', None)
                 }
                 for name, m in brain.models.items()
             }
