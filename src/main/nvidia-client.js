@@ -15,7 +15,9 @@ const axios = require('axios');
 
 const NVIDIA_API_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const NVIDIA_API_KEY = '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';
-const DEFAULT_MODEL = 'moonshotai/kimi-k2.6';
+const ARCHITECTURE_MODEL = 'moonshotai/kimi-k2.6';  // Use Kimi for architecture (quality matters)
+const TRAINING_MODEL = 'meta/llama-3.1-8b-instruct';   // Use Llama for training data (speed: 0.3s vs 60-120s)
+const DEFAULT_MODEL = 'meta/llama-3.1-8b-instruct';    // Default to fast model
 const FALLBACK_MODEL = 'meta/llama-3.1-8b-instruct';
 
 // z-ai SDK for fallback
@@ -256,21 +258,21 @@ Generate the LNN model JSON now.`;
 
   let content = null;
 
-  // Try NVIDIA API with streaming for better performance
+  // Try NVIDIA API with the FAST model first (Llama 3.1: 0.3s vs Kimi's 60-120s)
   try {
-    console.log('[NvidiaClient] Generating LNN architecture with Kimi K2.6 (streaming)...');
+    console.log('[NvidiaClient] Generating LNN architecture with fast model (Llama 3.1)...');
     content = await callNvidiaStreaming([
       { role: 'system', content: LNN_SYSTEM_PROMPT },
       { role: 'user', content: userMessage }
-    ], { temperature: 0.3, maxTokens: 2048 });
+    ], { model: TRAINING_MODEL, temperature: 0.3, maxTokens: 2048 });
   } catch (nvidiaErr) {
-    console.warn('[NvidiaClient] Kimi K2.6 failed for LNN generation:', nvidiaErr.message);
+    console.warn('[NvidiaClient] Fast model failed for LNN generation:', nvidiaErr.message);
 
-    // Try with the faster fallback model
+    // Try with Kimi K2.6 as quality fallback
     try {
-      console.log('[NvidiaClient] Trying fallback model (Llama 3.1)...');
+      console.log('[NvidiaClient] Trying Kimi K2.6 as quality fallback...');
       const fallbackResponse = await axios.post(NVIDIA_API_URL, {
-        model: FALLBACK_MODEL,
+        model: ARCHITECTURE_MODEL,
         messages: [
           { role: 'system', content: LNN_SYSTEM_PROMPT },
           { role: 'user', content: userMessage }
@@ -282,7 +284,7 @@ Generate the LNN model JSON now.`;
           'Authorization': `Bearer ${NVIDIA_API_KEY}`,
           'Content-Type': 'application/json'
         },
-        timeout: 60000
+        timeout: 180000
       });
       content = fallbackResponse.data?.choices?.[0]?.message?.content;
       console.log('[NvidiaClient] Successfully used fallback model for LNN generation');
@@ -546,13 +548,13 @@ Output ONLY the JSON object.`;
   let content = null;
 
   try {
-    console.log(`[NvidiaClient] Generating batch "${scenarioType}" with Kimi K2.6 (streaming)...`);
+    console.log(`[NvidiaClient] Generating batch "${scenarioType}" with ${TRAINING_MODEL} (fast model)...`);
     content = await callNvidiaStreaming([
       { role: 'system', content: BATCH_PROMPT },
       { role: 'user', content: `Generate ${batchSize} training examples for the ${scenarioType} scenario now.` }
-    ], { temperature: 0.6, maxTokens: 8192 });
+    ], { model: TRAINING_MODEL, temperature: 0.6, maxTokens: 8192 });
   } catch (err) {
-    console.warn(`[NvidiaClient] Batch "${scenarioType}" failed with Kimi: ${err.message}`);
+    console.warn(`[NvidiaClient] Batch "${scenarioType}" failed with ${TRAINING_MODEL}: ${err.message}`);
 
     // Try fallback model
     try {
