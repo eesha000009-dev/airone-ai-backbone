@@ -488,6 +488,370 @@ Output ONLY the JSON object.`;
 }
 
 /**
+ * Generate a single batch of training data from Kimi K2.6 focused on a specific scenario type.
+ * This is a helper function used by generateMassiveTrainingData().
+ * @param {Object} params - { robotData, inputNames, outputNames, modelConfig, scenarioType, scenarioDescription, batchSize }
+ * @returns {Array} - Array of training examples (may be empty if API fails)
+ */
+async function generateTrainingBatch({ robotData, inputNames, outputNames, modelConfig, scenarioType, scenarioDescription, batchSize = 50 }) {
+  const behaviorRules = modelConfig.behavior_rules || [];
+  const rulesText = behaviorRules.length > 0
+    ? behaviorRules.map((r, i) => `${i + 1}. IF ${r.condition} THEN ${r.action} (priority: ${r.priority || 1})`).join('\n')
+    : 'Use reasonable robot behaviors based on the robot description.';
+
+  const BATCH_PROMPT = `You are generating SYNTHETIC TRAINING DATA for a Liquid Neural Network that controls a robot. Output ONLY valid JSON, no markdown, no explanation, no code fences.
+
+Robot: ${robotData.name || 'Unnamed'} (${robotData.type || 'Custom'})
+Purpose: ${robotData.purpose || 'General'}
+Environment: ${robotData.environment || 'Indoor'}
+
+Input sensors (${inputNames.length}): ${inputNames.join(', ')}
+Output actuators (${outputNames.length}): ${outputNames.join(', ')}
+
+Output types: ${JSON.stringify(modelConfig.output_types || {})}
+
+Behavior rules:
+${rulesText}
+
+SCENARIO FOCUS: ${scenarioType}
+${scenarioDescription}
+
+Generate EXACTLY this JSON structure with ${batchSize} training examples focused on the above scenario:
+{
+  "training_data": [
+    {
+      "inputs": { "sensor_name": normalized_value_0_to_1, ... },
+      "expected_outputs": { "actuator_name": normalized_value_0_to_1, ... }
+    }
+  ]
+}
+
+NORMALIZATION RULES:
+- Ultrasonic/distance sensors: raw_cm / 400 (max range ~400cm)
+- Temperature sensors: (raw_celsius - (-20)) / 80 (range -20 to 60°C)
+- Light sensors: raw_value / 1023 (0-1023 range)
+- Microphone/sound: 0 for silence, 0.5 for moderate, 1.0 for loud
+- Camera/object detection: 0 for nothing, 0.5 for object far, 1.0 for object close
+- PIR/motion: 0 for no motion, 1 for motion detected
+- Generic analog: raw / 1023
+
+OUTPUT NORMALIZATION:
+- PWM/motor outputs: 0 to 1 (maps to 0-255 PWM)
+- Servo outputs: 0 to 1 (maps to 0-180 degrees)
+- Digital/LED outputs: 0 or 1
+
+IMPORTANT: Make each example UNIQUE and REALISTIC for the scenario. Vary the sensor values meaningfully.
+Output ONLY the JSON object.`;
+
+  let content = null;
+
+  try {
+    console.log(`[NvidiaClient] Generating batch "${scenarioType}" with Kimi K2.6 (streaming)...`);
+    content = await callNvidiaStreaming([
+      { role: 'system', content: BATCH_PROMPT },
+      { role: 'user', content: `Generate ${batchSize} training examples for the ${scenarioType} scenario now.` }
+    ], { temperature: 0.6, maxTokens: 8192 });
+  } catch (err) {
+    console.warn(`[NvidiaClient] Batch "${scenarioType}" failed with Kimi: ${err.message}`);
+
+    // Try fallback model
+    try {
+      console.log(`[NvidiaClient] Trying fallback model for batch "${scenarioType}"...`);
+      const response = await axios.post(NVIDIA_API_URL, {
+        model: FALLBACK_MODEL,
+        messages: [
+          { role: 'system', content: BATCH_PROMPT },
+          { role: 'user', content: `Generate ${batchSize} training examples for the ${scenarioType} scenario now.` }
+        ],
+        temperature: 0.6,
+        max_tokens: 8192
+      }, {
+        headers: {
+          'Authorization': `Bearer ${NVIDIA_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 120000
+      });
+      content = response.data?.choices?.[0]?.message?.content;
+    } catch (fallbackErr) {
+      console.warn(`[NvidiaClient] Fallback also failed for batch "${scenarioType}": ${fallbackErr.message}`);
+    }
+  }
+
+  if (!content) {
+    console.warn(`[NvidiaClient] All API calls failed for batch "${scenarioType}", returning empty batch`);
+    return [];
+  }
+
+  let parsed = null;
+  try {
+    parsed = JSON.parse(content);
+  } catch (_e) {
+    const jsonMatch = content.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      try {
+        parsed = JSON.parse(jsonMatch[0]);
+      } catch (_e2) {
+        // Couldn't parse
+      }
+    }
+  }
+
+  if (!parsed || !parsed.training_data || !Array.isArray(parsed.training_data)) {
+    console.warn(`[NvidiaClient] Could not parse training data from batch "${scenarioType}"`);
+    return [];
+  }
+
+  console.log(`[NvidiaClient] Batch "${scenarioType}": got ${parsed.training_data.length} examples`);
+  return parsed.training_data;
+}
+
+/**
+ * Augment training data by adding noise variants and interpolated examples.
+ * - Creates 3 noise variants per example with ±5% random noise on inputs
+ * - Creates interpolated examples between adjacent examples
+ * This can 3-4x the training data size.
+ * @param {Array} trainingData - Original training examples
+ * @returns {Array} - Augmented training examples (includes originals)
+ */
+function augmentTrainingData(trainingData) {
+  if (!trainingData || trainingData.length === 0) return trainingData;
+
+  const augmented = [...trainingData]; // Start with originals
+  const noiseFactor = 0.05; // ±5%
+
+  // Phase 1: Create 3 noise variants for each example
+  for (const example of trainingData) {
+    for (let variant = 0; variant < 3; variant++) {
+      const noisyInputs = {};
+      const noisyOutputs = {};
+
+      // Add noise to inputs
+      if (example.inputs) {
+        for (const [key, val] of Object.entries(example.inputs)) {
+          const numVal = typeof val === 'number' ? val : parseFloat(val) || 0;
+          const noise = (Math.random() * 2 - 1) * noiseFactor; // ±5%
+          noisyInputs[key] = Math.max(0, Math.min(1, numVal + noise));
+        }
+      }
+
+      // Copy expected outputs (no noise - we want correct targets)
+      if (example.expected_outputs) {
+        for (const [key, val] of Object.entries(example.expected_outputs)) {
+          noisyOutputs[key] = typeof val === 'number' ? val : parseFloat(val) || 0;
+        }
+      }
+
+      augmented.push({ inputs: noisyInputs, expected_outputs: noisyOutputs });
+    }
+  }
+
+  // Phase 2: Create interpolated examples between adjacent pairs
+  const originalCount = trainingData.length;
+  for (let i = 0; i < originalCount - 1; i++) {
+    const ex1 = trainingData[i];
+    const ex2 = trainingData[i + 1];
+
+    // Only interpolate if both have the same input/output keys
+    const keys1 = Object.keys(ex1.inputs || {}).sort().join(',');
+    const keys2 = Object.keys(ex2.inputs || {}).sort().join(',');
+    if (keys1 !== keys2) continue;
+
+    const interpInputs = {};
+    const interpOutputs = {};
+    const alpha = 0.5; // Midpoint interpolation
+
+    if (ex1.inputs && ex2.inputs) {
+      for (const key of Object.keys(ex1.inputs)) {
+        const v1 = typeof ex1.inputs[key] === 'number' ? ex1.inputs[key] : parseFloat(ex1.inputs[key]) || 0;
+        const v2 = typeof ex2.inputs[key] === 'number' ? ex2.inputs[key] : parseFloat(ex2.inputs[key]) || 0;
+        interpInputs[key] = v1 * alpha + v2 * (1 - alpha);
+      }
+    }
+
+    if (ex1.expected_outputs && ex2.expected_outputs) {
+      for (const key of Object.keys(ex1.expected_outputs)) {
+        const v1 = typeof ex1.expected_outputs[key] === 'number' ? ex1.expected_outputs[key] : parseFloat(ex1.expected_outputs[key]) || 0;
+        const v2 = typeof ex2.expected_outputs[key] === 'number' ? ex2.expected_outputs[key] : parseFloat(ex2.expected_outputs[key]) || 0;
+        interpOutputs[key] = v1 * alpha + v2 * (1 - alpha);
+      }
+    }
+
+    augmented.push({ inputs: interpInputs, expected_outputs: interpOutputs });
+  }
+
+  return augmented;
+}
+
+/**
+ * Generate massive training data by calling Kimi K2.6 in multiple batches,
+ * then supplementing with rule-based data and augmentation.
+ * Target: 1000+ training examples.
+ * @param {Object} params - { robotData, pins, modelConfig, conversationHistory, progressCallback }
+ * @returns {Array} - Array of training examples
+ */
+async function generateMassiveTrainingData({ robotData, pins, modelConfig, conversationHistory, progressCallback }) {
+  const inputPins = pins.filter(p => {
+    const mode = (p.mode || '').toLowerCase();
+    return mode === 'input' || mode === 'in' || mode === 'analog';
+  });
+  const outputPins = pins.filter(p => {
+    const mode = (p.mode || '').toLowerCase();
+    return mode === 'output' || mode === 'out' || mode === 'pwm';
+  });
+
+  const inputNames = inputPins.map(p => p.name || p.pin_name);
+  const outputNames = outputPins.map(p => p.name || p.pin_name);
+
+  const emit = (step, message, extra = {}) => {
+    if (progressCallback) {
+      progressCallback({ step, message, ...extra });
+    }
+  };
+
+  // Define 10+ scenario batches
+  const scenarioBatches = [
+    {
+      type: 'Emergency Scenarios',
+      description: 'Obstacle VERY close (5-20cm) from each direction: front, left, right, behind. Robot must STOP, REVERSE, or TURN HARD immediately. Motor outputs near 0 or sharp differential. Critical safety scenarios.',
+      batchSize: 50
+    },
+    {
+      type: 'Normal Navigation',
+      description: 'Clear paths with obstacles at safe distances (>100cm). Robot cruises forward at moderate to high speed. All distance sensors show far readings. Smooth, predictable motor outputs.',
+      batchSize: 50
+    },
+    {
+      type: 'Edge Cases',
+      description: 'Obstacles on multiple sides simultaneously. Robot must choose best escape direction. Ambiguous situations where left AND right are blocked, or front AND one side are blocked.',
+      batchSize: 50
+    },
+    {
+      type: 'Gradual Approach',
+      description: 'Medium distances (40-100cm). Robot should slow down gradually as it approaches obstacles. Smooth deceleration curves. Motor speed proportional to nearest obstacle distance.',
+      batchSize: 50
+    },
+    {
+      type: 'Sharp Turns and Pivots',
+      description: 'Scenarios requiring sharp directional changes. One side suddenly blocked, robot must pivot 90+ degrees. Differential motor control: one motor full forward, other stopped or reversed.',
+      batchSize: 50
+    },
+    {
+      type: 'Recovery Scenarios',
+      description: 'Robot is stuck or trapped. All directions blocked at close range. Robot should attempt small random movements, reverse, or wait. Getting unstuck behaviors.',
+      batchSize: 50
+    },
+    {
+      type: 'Speed Variations',
+      description: 'Same obstacle configuration at different approach speeds. How robot responds when it has more or less time to react. Varying motor power levels from 10% to 100%.',
+      batchSize: 50
+    },
+    {
+      type: 'Sensor Noise and Tolerance',
+      description: 'Slightly inconsistent sensor readings. Same scenario but with ±5-10% variation in sensor values. Robot should produce consistent outputs despite noisy inputs. Tolerance to sensor jitter.',
+      batchSize: 50
+    },
+    {
+      type: 'Complex Multi-Obstacle',
+      description: 'Multiple obstacles at different distances simultaneously. 3+ obstacles detected at varying ranges. Robot must navigate through gaps, prioritize nearest threat, plan path through clutter.',
+      batchSize: 50
+    },
+    {
+      type: 'Idle and Low-Power States',
+      description: 'Robot is idle, no obstacles detected, no motion. Low-power standby mode. Minimal motor activity. Startup from idle when obstacle appears. Transition from active to idle.',
+      batchSize: 50
+    }
+  ];
+
+  console.log(`[NvidiaClient] ⚠️  MASSIVE TRAINING DATA GENERATION STARTING`);
+  console.log(`[NvidiaClient] ⚠️  This will take a while (${scenarioBatches.length} batches, each ~60s)`);
+  emit('generating_batch', `Starting massive data generation: ${scenarioBatches.length} batches`, { batch: 0, total_batches: scenarioBatches.length, total_samples: 0 });
+
+  const allTrainingData = [];
+  let successfulBatches = 0;
+  let failedBatches = 0;
+
+  // Generate AI batches sequentially (to avoid API rate limits)
+  for (let i = 0; i < scenarioBatches.length; i++) {
+    const batch = scenarioBatches[i];
+    console.log(`[NvidiaClient] Batch ${i + 1}/${scenarioBatches.length}: "${batch.type}"`);
+
+    try {
+      const batchData = await generateTrainingBatch({
+        robotData,
+        inputNames,
+        outputNames,
+        modelConfig,
+        scenarioType: batch.type,
+        scenarioDescription: batch.description,
+        batchSize: batch.batchSize
+      });
+
+      if (batchData.length > 0) {
+        allTrainingData.push(...batchData);
+        successfulBatches++;
+      } else {
+        failedBatches++;
+        console.warn(`[NvidiaClient] Batch "${batch.type}" returned 0 examples`);
+      }
+    } catch (err) {
+      failedBatches++;
+      console.warn(`[NvidiaClient] Batch "${batch.type}" threw error: ${err.message}`);
+    }
+
+    emit('generating_batch', `Batch ${i + 1}/${scenarioBatches.length} "${batch.type}" complete`, {
+      batch: i + 1,
+      total_batches: scenarioBatches.length,
+      total_samples: allTrainingData.length
+    });
+
+    // Small delay between batches to avoid rate limiting
+    if (i < scenarioBatches.length - 1) {
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+  }
+
+  console.log(`[NvidiaClient] AI generation complete: ${allTrainingData.length} examples from ${successfulBatches}/${scenarioBatches.length} batches (${failedBatches} failed)`);
+
+  // Add rule-based training data (200+ additional examples)
+  console.log(`[NvidiaClient] Generating rule-based training data supplement...`);
+  const ruleBasedData = generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robotData);
+  if (ruleBasedData.training_data && ruleBasedData.training_data.length > 0) {
+    allTrainingData.push(...ruleBasedData.training_data);
+  }
+  console.log(`[NvidiaClient] After rule-based supplement: ${allTrainingData.length} total examples`);
+
+  // Generate additional rule-based scenarios (200+ more by running with different random seeds)
+  for (let extra = 0; extra < 3; extra++) {
+    const extraData = generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robotData);
+    if (extraData.training_data && extraData.training_data.length > 0) {
+      allTrainingData.push(...extraData.training_data);
+    }
+  }
+  console.log(`[NvidiaClient] After extra rule-based rounds: ${allTrainingData.length} total examples`);
+
+  emit('augmenting', `Augmenting ${allTrainingData.length} examples with noise and interpolation`, { total_samples: allTrainingData.length });
+
+  // Augment the data
+  const augmentedData = augmentTrainingData(allTrainingData);
+  console.log(`[NvidiaClient] After augmentation: ${augmentedData.length} total examples (was ${allTrainingData.length})`);
+
+  // Deduplicate (remove exact duplicate inputs)
+  const seen = new Set();
+  const deduplicated = augmentedData.filter(example => {
+    const key = JSON.stringify(example.inputs);
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+
+  console.log(`[NvidiaClient] After deduplication: ${deduplicated.length} unique examples`);
+  console.log(`[NvidiaClient] ✅ MASSIVE TRAINING DATA COMPLETE: ${deduplicated.length} examples`);
+
+  return deduplicated;
+}
+
+/**
  * Generate training data from behavior rules (fallback when AI is unavailable).
  * Generates 50+ diverse scenarios with strong output signals (near 0 or 1).
  * Includes specialized obstacle avoidance logic for side-specific motor control.
@@ -886,12 +1250,13 @@ function generateDefaultSensorValue(name) {
 
 /**
  * Step 3: Train the LNN model using the generated training data.
- * Uses simple gradient descent (backpropagation through time, 1 step).
+ * Uses gradient descent with momentum, LR scheduling, and early stopping.
+ * Enhanced for massive training data: 2000 epochs, LR decay, momentum, patience.
  * Returns the model config with trained weights.
  */
 function trainLnnModel(modelConfig, trainingData, options = {}) {
-  const epochs = options.epochs || 300;
-  const learningRate = options.learningRate || 0.02;
+  const epochs = options.epochs || 2000;
+  const initialLearningRate = options.learningRate || 0.05;
   const hiddenUnits = modelConfig.hidden_units || 16;
   const inputSize = modelConfig.input_size;
   const outputSize = modelConfig.output_size;
@@ -902,6 +1267,20 @@ function trainLnnModel(modelConfig, trainingData, options = {}) {
   let W_out = modelConfig.weights?.W_out || xavierInit(outputSize, hiddenUnits);
   let b_in = modelConfig.weights?.b_in || new Array(hiddenUnits).fill(0);
   let b_out = modelConfig.weights?.b_out || new Array(outputSize).fill(0);
+
+  // Initialize momentum buffers (velocity matrices)
+  let vW_in = Array.from({ length: hiddenUnits }, () => new Array(inputSize).fill(0));
+  let vW_out = Array.from({ length: outputSize }, () => new Array(hiddenUnits).fill(0));
+  let vb_in = new Array(hiddenUnits).fill(0);
+  let vb_out = new Array(outputSize).fill(0);
+
+  const momentum = options.momentum || 0.9;
+  const lrDecayRate = options.lrDecayRate || 0.95;
+  const lrDecayInterval = options.lrDecayInterval || 100;
+  const patience = options.patience || 100;
+  const accuracyThreshold = options.accuracyThreshold || 0.15; // Within 0.15 of target (tighter than old 0.2)
+
+  let currentLearningRate = initialLearningRate;
 
   const inputMapping = modelConfig.input_mapping || {};
   const outputMapping = modelConfig.output_mapping || {};
@@ -938,14 +1317,23 @@ function trainLnnModel(modelConfig, trainingData, options = {}) {
     return { modelConfig, accuracy: 0, loss: 1, epochs: 0 };
   }
 
-  console.log(`[NvidiaClient] Training LNN: ${examples.length} examples, ${epochs} epochs`);
+  console.log(`[NvidiaClient] Training LNN: ${examples.length} examples, ${epochs} epochs, LR=${currentLearningRate}, momentum=${momentum}`);
+  console.log(`[NvidiaClient] ⚠️  Training may take a while with ${examples.length} examples and ${epochs} max epochs`);
 
   // Training loop
   let lastLoss = Infinity;
   let bestWeights = { W_in, W_rec, W_out, b_in, b_out };
   let bestLoss = Infinity;
+  let bestEpoch = 0;
+  let epochsSinceImprovement = 0;
 
   for (let epoch = 0; epoch < epochs; epoch++) {
+    // Learning rate scheduling: decay by lrDecayRate every lrDecayInterval epochs
+    if (epoch > 0 && epoch % lrDecayInterval === 0) {
+      currentLearningRate *= lrDecayRate;
+      console.log(`[NvidiaClient] LR decay at epoch ${epoch}: new LR=${currentLearningRate.toFixed(6)}`);
+    }
+
     let totalLoss = 0;
     let correctCount = 0;
 
@@ -982,8 +1370,8 @@ function trainLnnModel(modelConfig, trainingData, options = {}) {
       for (let i = 0; i < outputSize; i++) {
         const error = output[i] - example.target[i];
         exampleLoss += error * error;
-        // Check if output is "correct" (within 0.2 of target)
-        if (Math.abs(error) > 0.2) exampleCorrect = false;
+        // Check if output is "correct" (within accuracyThreshold of target)
+        if (Math.abs(error) > accuracyThreshold) exampleCorrect = false;
       }
       totalLoss += exampleLoss / outputSize;
       if (exampleCorrect) correctCount++;
@@ -1006,20 +1394,26 @@ function trainLnnModel(modelConfig, trainingData, options = {}) {
         hiddenDelta[i] = errorSum * (1 - hidden[i] * hidden[i]); // tanh derivative
       }
 
-      // Update output weights
+      // Update output weights with momentum
       for (let i = 0; i < outputSize; i++) {
         for (let j = 0; j < hiddenUnits; j++) {
-          W_out[i][j] -= learningRate * outputDelta[i] * hidden[j];
+          const gradient = outputDelta[i] * hidden[j];
+          vW_out[i][j] = momentum * vW_out[i][j] + currentLearningRate * gradient;
+          W_out[i][j] -= vW_out[i][j];
         }
-        b_out[i] -= learningRate * outputDelta[i];
+        vb_out[i] = momentum * vb_out[i] + currentLearningRate * outputDelta[i];
+        b_out[i] -= vb_out[i];
       }
 
-      // Update input weights
+      // Update input weights with momentum
       for (let i = 0; i < hiddenUnits; i++) {
         for (let j = 0; j < inputSize; j++) {
-          W_in[i][j] -= learningRate * hiddenDelta[i] * example.input[j];
+          const gradient = hiddenDelta[i] * example.input[j];
+          vW_in[i][j] = momentum * vW_in[i][j] + currentLearningRate * gradient;
+          W_in[i][j] -= vW_in[i][j];
         }
-        b_in[i] -= learningRate * hiddenDelta[i];
+        vb_in[i] = momentum * vb_in[i] + currentLearningRate * hiddenDelta[i];
+        b_in[i] -= vb_in[i];
       }
     }
 
@@ -1029,6 +1423,8 @@ function trainLnnModel(modelConfig, trainingData, options = {}) {
     // Track best weights
     if (lastLoss < bestLoss) {
       bestLoss = lastLoss;
+      bestEpoch = epoch;
+      epochsSinceImprovement = 0;
       bestWeights = {
         W_in: W_in.map(row => [...row]),
         W_rec: W_rec.map(row => [...row]),
@@ -1036,33 +1432,52 @@ function trainLnnModel(modelConfig, trainingData, options = {}) {
         b_in: [...b_in],
         b_out: [...b_out]
       };
+    } else {
+      epochsSinceImprovement++;
     }
 
-    // Log progress every 20 epochs
-    if (epoch % 20 === 0 || epoch === epochs - 1) {
-      console.log(`[NvidiaClient] Epoch ${epoch + 1}/${epochs}: loss=${lastLoss.toFixed(4)}, accuracy=${(accuracy * 100).toFixed(1)}%`);
+    // Log progress every 50 epochs
+    if (epoch % 50 === 0 || epoch === epochs - 1) {
+      console.log(`[NvidiaClient] Epoch ${epoch + 1}/${epochs}: loss=${lastLoss.toFixed(4)}, accuracy=${(accuracy * 100).toFixed(1)}%, LR=${currentLearningRate.toFixed(6)}`);
+      // Call onProgress callback if provided
+      if (options.onProgress) {
+        options.onProgress(epoch + 1, lastLoss, accuracy);
+      }
     }
 
     // Early stopping if loss is very low
     if (lastLoss < 0.001) {
-      console.log(`[NvidiaClient] Early stopping at epoch ${epoch + 1}: loss=${lastLoss.toFixed(6)}`);
+      console.log(`[NvidiaClient] Early stopping at epoch ${epoch + 1}: loss=${lastLoss.toFixed(6)} (converged)`);
       break;
+    }
+
+    // Early stopping with patience
+    if (epochsSinceImprovement >= patience) {
+      console.log(`[NvidiaClient] Early stopping at epoch ${epoch + 1}: no improvement for ${patience} epochs (best was epoch ${bestEpoch + 1})`);
+      break;
+    }
+
+    // If we hit target accuracy, stop early
+    if (accuracy >= 0.85) {
+      console.log(`[NvidiaClient] Target accuracy reached at epoch ${epoch + 1}: ${(accuracy * 100).toFixed(1)}%`);
+      // Continue training for a bit more to refine, but log the achievement
     }
   }
 
   // Use best weights
   modelConfig.weights = bestWeights;
 
-  // Calculate final accuracy
+  // Calculate final accuracy with tighter threshold
   const finalAccuracy = evaluateModel(modelConfig, examples);
 
-  console.log(`[NvidiaClient] Training complete: loss=${bestLoss.toFixed(4)}, accuracy=${(finalAccuracy * 100).toFixed(1)}%`);
+  console.log(`[NvidiaClient] Training complete: loss=${bestLoss.toFixed(4)}, accuracy=${(finalAccuracy * 100).toFixed(1)}% (best epoch: ${bestEpoch + 1})`);
 
   return {
     modelConfig,
     accuracy: finalAccuracy,
     loss: bestLoss,
-    epochs
+    epochs: bestEpoch + 1,
+    totalEpochsRun: epochs
   };
 }
 
@@ -1236,7 +1651,7 @@ function evaluateModel(modelConfig, examples) {
 
     let exampleCorrect = true;
     for (let i = 0; i < outputSize; i++) {
-      if (Math.abs(output[i] - example.target[i]) > 0.2) {
+      if (Math.abs(output[i] - example.target[i]) > 0.15) {
         exampleCorrect = false;
         break;
       }
@@ -1248,7 +1663,9 @@ function evaluateModel(modelConfig, examples) {
 }
 
 /**
- * Full pipeline: Generate LNN architecture → Generate training data → Train → Verify
+ * Full pipeline: Generate LNN architecture → Generate massive training data → Train → Verify
+ * Uses generateMassiveTrainingData for 1000+ training examples.
+ * Enhanced training with momentum, LR scheduling, 2000 epochs, patience.
  * Emits progress events via the callback.
  */
 async function generateAndTrainLnn({ robotData, pins, conversationHistory }, progressCallback) {
@@ -1261,24 +1678,44 @@ async function generateAndTrainLnn({ robotData, pins, conversationHistory }, pro
   // Step 1: Generate LNN Architecture
   emit('generating', 5, 'Generating LNN architecture...');
   const modelConfig = await generateLnnArchitecture({ robotData, pins, conversationHistory });
-  emit('generating', 20, `Architecture: ${modelConfig.input_size}in → ${modelConfig.hidden_units}hidden → ${modelConfig.output_size}out`);
+  emit('generating', 15, `Architecture: ${modelConfig.input_size}in → ${modelConfig.hidden_units}hidden → ${modelConfig.output_size}out`);
 
-  // Step 2: Generate Training Data
-  emit('creating_data', 25, 'Generating synthetic training data...');
-  const trainingData = await generateTrainingData({ robotData, pins, modelConfig, conversationHistory });
-  emit('creating_data', 40, `Generated ${trainingData.length} training examples`);
-
-  // Step 3: Train LNN
-  emit('training', 45, 'Training LNN (epoch 0/300)...');
-  const trainResult = trainLnnModel(modelConfig, trainingData, {
-    epochs: 300,
-    learningRate: 0.02,
-    onProgress: (epoch, loss, accuracy) => {
-      const progress = 45 + Math.round((epoch / 300) * 35);
-      emit('training', progress, `Training LNN (epoch ${epoch}/300, loss=${loss.toFixed(4)})`, { accuracy });
+  // Step 2: Generate MASSIVE Training Data
+  console.log('[NvidiaClient] ⚠️  Starting massive pre-training pipeline. This will take time...');
+  emit('creating_data', 18, 'Generating MASSIVE training data (10+ AI batches + rule-based + augmentation)...');
+  const trainingData = await generateMassiveTrainingData({
+    robotData,
+    pins,
+    modelConfig,
+    conversationHistory,
+    progressCallback: (evt) => {
+      if (evt.step === 'generating_batch') {
+        const batchProgress = 18 + Math.round((evt.batch / (evt.total_batches || 10)) * 15);
+        emit('creating_data', batchProgress, evt.message, { total_samples: evt.total_samples });
+      } else if (evt.step === 'augmenting') {
+        emit('creating_data', 35, evt.message, { total_samples: evt.total_samples });
+      }
     }
   });
-  emit('training', 80, `Training complete: accuracy ${(trainResult.accuracy * 100).toFixed(1)}%`, { accuracy: trainResult.accuracy });
+  emit('creating_data', 38, `Generated ${trainingData.length} training examples (target: 1000+)`);
+
+  // Step 3: Train LNN with enhanced settings
+  console.log(`[NvidiaClient] ⚠️  Starting training with ${trainingData.length} examples and up to 2000 epochs. This may take several minutes...`);
+  emit('training', 40, `Training LNN with ${trainingData.length} examples (up to 2000 epochs)...`);
+  const trainResult = trainLnnModel(modelConfig, trainingData, {
+    epochs: 2000,
+    learningRate: 0.05,
+    momentum: 0.9,
+    lrDecayRate: 0.95,
+    lrDecayInterval: 100,
+    patience: 100,
+    accuracyThreshold: 0.15,
+    onProgress: (epoch, loss, accuracy) => {
+      const progress = 40 + Math.round((epoch / 2000) * 40);
+      emit('training', Math.min(progress, 79), `Training LNN (epoch ${epoch}/2000, loss=${loss.toFixed(4)}, accuracy=${(accuracy * 100).toFixed(1)}%)`, { epoch, accuracy, loss });
+    }
+  });
+  emit('training', 80, `Training complete: accuracy ${(trainResult.accuracy * 100).toFixed(1)}% after ${trainResult.epochs} epochs`, { accuracy: trainResult.accuracy });
 
   // Step 4: Check for Errors
   emit('checking', 82, 'Validating model configuration...');
@@ -1292,9 +1729,9 @@ async function generateAndTrainLnn({ robotData, pins, conversationHistory }, pro
   emit('checking', 88, 'Model configuration valid');
 
   // Step 5: Test LNN Behavior
-  emit('testing', 90, 'Running behavior tests...');
+  emit('verifying', 90, 'Running behavior tests...');
   const verifyResult = verifyLnnModel(modelConfig, trainingData);
-  emit('testing', 95, `Tests: ${verifyResult.passed}/${verifyResult.total} passed`, { accuracy: verifyResult.accuracy });
+  emit('verifying', 95, `Tests: ${verifyResult.passed}/${verifyResult.total} passed`, { passed: verifyResult.passed, failed: verifyResult.failed, accuracy: verifyResult.accuracy });
 
   if (!verifyResult.passedOverall) {
     console.warn('[NvidiaClient] Model verification below threshold, but proceeding with deployment');
@@ -1305,11 +1742,14 @@ async function generateAndTrainLnn({ robotData, pins, conversationHistory }, pro
   modelConfig.trained = true;
   modelConfig.training_info = {
     epochs: trainResult.epochs,
+    total_epochs_run: trainResult.totalEpochsRun || trainResult.epochs,
     final_loss: trainResult.loss,
     accuracy: trainResult.accuracy,
     verification_passed: verifyResult.passedOverall,
     verification_accuracy: verifyResult.accuracy,
-    training_examples: trainingData.length
+    training_examples: trainingData.length,
+    target_accuracy: 0.85,
+    training_mode: 'massive_pretain'
   };
   emit('complete', 100, 'LNN model ready!', { model_id: `lnn-${Date.now()}`, accuracy: trainResult.accuracy, config: modelConfig });
 
@@ -1326,7 +1766,11 @@ module.exports = {
   generateLnnModel,
   generateLnnArchitecture,
   generateTrainingData,
+  generateTrainingDataFromRules,
   trainLnnModel,
   verifyLnnModel,
-  generateAndTrainLnn
+  generateAndTrainLnn,
+  generateMassiveTrainingData,
+  generateTrainingBatch,
+  augmentTrainingData
 };

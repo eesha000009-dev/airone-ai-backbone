@@ -191,8 +191,8 @@ class LiquidNeuralNetwork:
 
 
 class RuleBasedFallback:
-    """Rule-based fallback controller when LNN training accuracy is too low (< 0.6).
-    Uses simple if-then rules derived from the model's behavior_rules config.
+    """Rule-based fallback controller when LNN training accuracy is too low (< 0.85).
+    Uses if-then rules with left/right motor differentiation for obstacle avoidance.
     """
 
     def __init__(self, config):
@@ -204,61 +204,150 @@ class RuleBasedFallback:
         self.output_reverse = {v: k for k, v in self.output_mapping.items()}
 
     def forward(self, inputs):
-        """Apply rules to generate output commands."""
+        """Apply rules to generate output commands with left/right motor differentiation.
+
+        Obstacle avoidance logic:
+        - Obstacle close on LEFT  -> stop LEFT motor, keep RIGHT motor -> turns RIGHT
+        - Obstacle close on RIGHT -> stop RIGHT motor, keep LEFT motor -> turns LEFT
+        - Obstacle close in FRONT -> stop BOTH motors -> then turn
+        """
         if isinstance(inputs, dict):
             sensor_data = inputs
         else:
             sensor_data = {}
 
-        # Start with default outputs (all off)
-        default_outputs = {}
-        for name, idx in self.output_mapping.items():
-            out_type = self.output_types.get(name, 'digital')
-            if out_type in ('pwm', 'motor'):
-                default_outputs[name] = 0.7  # Default moderate speed
-            elif out_type == 'servo':
-                default_outputs[name] = 0.5  # Center position
+        # Identify left/right/front sensors by name patterns
+        left_sensors = []
+        right_sensors = []
+        front_sensors = []
+
+        for name, val in sensor_data.items():
+            if not isinstance(val, (int, float)):
+                continue
+            name_lower = name.lower()
+            if any(kw in name_lower for kw in ['left', 'lft']):
+                left_sensors.append((name, val))
+            elif any(kw in name_lower for kw in ['right', 'rgt']):
+                right_sensors.append((name, val))
+            elif any(kw in name_lower for kw in ['front', 'center', 'mid']):
+                front_sensors.append((name, val))
+
+        # If no directional sensors found, split generic distance sensors
+        if not left_sensors and not right_sensors and not front_sensors:
+            dist_entries = [(k, v) for k, v in sensor_data.items()
+                            if isinstance(v, (int, float)) and
+                            ('ultrasonic' in k.lower() or 'distance' in k.lower() or
+                             'proximity' in k.lower() or 'ir' in k.lower() or
+                             'sonar' in k.lower())]
+            if len(dist_entries) >= 2:
+                half = len(dist_entries) // 2
+                left_sensors = dist_entries[:half]
+                right_sensors = dist_entries[half:]
+            elif dist_entries:
+                front_sensors = dist_entries
+
+        # Compute proximity per direction (lower value = closer obstacle)
+        left_min = min((v for _, v in left_sensors), default=1.0)
+        right_min = min((v for _, v in right_sensors), default=1.0)
+        front_min = min((v for _, v in front_sensors), default=1.0)
+        overall_min = min(left_min, right_min, front_min)
+
+        # Identify left/right motor outputs by name patterns
+        left_motor_name = None
+        right_motor_name = None
+        other_outputs = []
+
+        for name in self.output_mapping:
+            name_lower = name.lower()
+            if any(kw in name_lower for kw in ['left', 'lft']):
+                left_motor_name = name
+            elif any(kw in name_lower for kw in ['right', 'rgt']):
+                right_motor_name = name
+
+        if not left_motor_name or not right_motor_name:
+            # Assign by index: first output = left, second = right
+            motor_names = [n for n in self.output_mapping
+                           if self.output_types.get(n, 'digital') in ('pwm', 'motor')
+                           or 'motor' in n.lower()]
+            if len(motor_names) >= 2:
+                if not left_motor_name:
+                    left_motor_name = motor_names[0]
+                if not right_motor_name:
+                    right_motor_name = motor_names[1]
+                other_outputs = [n for n in self.output_mapping
+                                 if n not in (left_motor_name, right_motor_name)]
             else:
-                default_outputs[name] = 0.0  # Off
+                other_outputs = list(self.output_mapping.keys())
+        else:
+            other_outputs = [n for n in self.output_mapping if n not in (left_motor_name, right_motor_name)]
 
-        outputs = dict(default_outputs)
+        OBSTACLE_THRESHOLD = 0.4  # Below this = obstacle detected
 
-        # Apply simple obstacle avoidance rules based on sensor values
-        dist_entries = [(k, v) for k, v in sensor_data.items()
-                        if isinstance(v, (int, float)) and
-                        ('ultrasonic' in k.lower() or 'distance' in k.lower())]
+        # Obstacle avoidance with directional awareness
+        if overall_min > OBSTACLE_THRESHOLD:
+            # Clear path: go forward at full speed
+            left_speed = 0.9
+            right_speed = 0.9
+        elif left_min < OBSTACLE_THRESHOLD and right_min >= OBSTACLE_THRESHOLD:
+            # Obstacle on LEFT -> stop LEFT motor, keep RIGHT motor going -> turns RIGHT
+            left_speed = 0.1
+            right_speed = 0.8
+        elif right_min < OBSTACLE_THRESHOLD and left_min >= OBSTACLE_THRESHOLD:
+            # Obstacle on RIGHT -> stop RIGHT motor, keep LEFT motor going -> turns LEFT
+            left_speed = 0.8
+            right_speed = 0.1
+        elif front_min < OBSTACLE_THRESHOLD:
+            # Obstacle in FRONT -> stop BOTH motors, then turn
+            left_speed = 0.0
+            right_speed = 0.0
+        else:
+            # Obstacles on both sides -> slight right turn to escape
+            left_speed = 0.7
+            right_speed = 0.2
 
-        min_dist = min((v for _, v in dist_entries), default=1.0)
+        # Scale speed by how close the nearest obstacle is (safety factor)
+        safety_factor = max(0.3, overall_min)
+        left_speed *= safety_factor
+        right_speed *= safety_factor
 
-        for name, idx in self.output_mapping.items():
+        # Clamp to [0, 1]
+        left_speed = max(0.0, min(1.0, left_speed))
+        right_speed = max(0.0, min(1.0, right_speed))
+
+        # Build output values
+        outputs = {}
+        if left_motor_name:
+            outputs[left_motor_name] = left_speed
+        if right_motor_name:
+            outputs[right_motor_name] = right_speed
+
+        # Handle other outputs (LEDs, buzzers, servos, etc.)
+        for name in other_outputs:
             out_type = self.output_types.get(name, 'digital')
-            desc = name.lower()
-
-            if out_type in ('pwm', 'motor') or 'motor' in desc:
-                if min_dist < 0.12:
-                    outputs[name] = 0.0
-                elif min_dist < 0.25:
-                    outputs[name] = 0.2
-                elif min_dist < 0.4:
-                    outputs[name] = 0.4
+            name_lower = name.lower()
+            if out_type == 'servo' or 'servo' in name_lower:
+                if overall_min < OBSTACLE_THRESHOLD:
+                    outputs[name] = 0.8  # Turn servo away
                 else:
-                    outputs[name] = 0.7
-            elif out_type == 'servo' or 'servo' in desc:
-                if min_dist < 0.15:
-                    outputs[name] = 0.8
-                else:
-                    outputs[name] = 0.5
+                    outputs[name] = 0.5  # Center
+            elif 'led' in name_lower or 'buzzer' in name_lower:
+                outputs[name] = 1.0 if overall_min < OBSTACLE_THRESHOLD else 0.0
+            elif out_type in ('pwm', 'motor') or 'motor' in name_lower:
+                # Extra motors without direction: moderate speed with safety
+                outputs[name] = 0.7 * safety_factor
+            else:
+                outputs[name] = 0.0  # Default off
 
         # Convert to command format
         commands = {}
         for name, val in outputs.items():
             if name in self.output_mapping:
                 out_type = self.output_types.get(name, 'digital')
-                if out_type in ('pwm', 'motor'):
+                if out_type in ('pwm', 'motor') or 'motor' in name.lower():
                     pwm_value = int(val * 255)
                     pwm_value = max(0, min(255, pwm_value))
                     commands[name] = {"action": "pwm", "value": pwm_value}
-                elif out_type == 'servo':
+                elif out_type == 'servo' or 'servo' in name.lower():
                     angle = int(val * 180)
                     angle = max(0, min(180, angle))
                     commands[name] = {"action": "servo", "angle": angle}
@@ -274,7 +363,7 @@ class MultiModelBrainServer:
 
     def __init__(self):
         self.models = {}  # robot_name -> LiquidNeuralNetwork
-        self.fallbacks = {}  # robot_name -> RuleBasedFallback (when accuracy < 0.6)
+        self.fallbacks = {}  # robot_name -> RuleBasedFallback (when accuracy < 0.85)
         self.load_models()
 
     def load_models(self):
@@ -306,8 +395,8 @@ class MultiModelBrainServer:
                     # Check training accuracy - use rule-based fallback if too low
                     training_info = model_config.get('training_info', {})
                     accuracy = training_info.get('accuracy', 1.0)
-                    if accuracy < 0.6:
-                        logger.warning(f"Robot '{robot_name}' training accuracy {accuracy:.1%} is below 0.6 threshold, enabling rule-based fallback")
+                    if accuracy < 0.85:
+                        logger.warning(f"Robot '{robot_name}' training accuracy {accuracy:.1%} is below 0.85 threshold, enabling rule-based fallback")
                         self.fallbacks[robot_name] = RuleBasedFallback(model_config)
                     else:
                         logger.info(f"Loaded model for robot: {robot_name} (inputs={model_config.get('input_size')}, outputs={model_config.get('output_size')}, accuracy={accuracy:.1%})")
@@ -342,11 +431,17 @@ class MultiModelBrainServer:
             logger.debug(f"Using rule-based fallback for robot '{robot_name}'")
             commands = self.fallbacks[robot_name].forward(sensor_data)
             mode = "rule-based-fallback"
-            confidence = 0.6
+            confidence = 0.7  # Rule-based fallback has decent reliability
         else:
             commands = model.forward(sensor_data)
             mode = "lnn"
-            confidence = 0.85
+            # Reflect actual training accuracy as confidence when LNN is well-trained
+            training_info = model.config.get('training_info', {})
+            accuracy = training_info.get('accuracy', None)
+            if accuracy is not None and accuracy >= 0.85:
+                confidence = accuracy
+            else:
+                confidence = 0.85  # Default confidence for LNN without accuracy info
 
         return {
             "output_commands": commands,
