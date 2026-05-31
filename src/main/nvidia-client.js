@@ -503,15 +503,15 @@ function generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robot
   // Categorize input and output pins by side/direction
   const leftDistNames = inputNames.filter(n => {
     const d = n.toLowerCase();
-    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('left') || d.includes('l'));
+    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('left'));
   });
   const rightDistNames = inputNames.filter(n => {
     const d = n.toLowerCase();
-    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('right') || d.includes('r'));
+    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('right'));
   });
   const frontDistNames = inputNames.filter(n => {
     const d = n.toLowerCase();
-    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('front') || d.includes('f') || d.includes('center'));
+    return (d.includes('ultrasonic') || d.includes('distance')) && (d.includes('front') || d.includes('center'));
   });
   const allDistNames = inputNames.filter(n => {
     const d = n.toLowerCase();
@@ -520,11 +520,11 @@ function generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robot
 
   const leftMotorNames = outputNames.filter(n => {
     const d = n.toLowerCase();
-    return (d.includes('motor') || outputTypes[n] === 'pwm') && (d.includes('left') || d.includes('l'));
+    return (d.includes('motor') || outputTypes[n] === 'pwm') && (d.includes('left'));
   });
   const rightMotorNames = outputNames.filter(n => {
     const d = n.toLowerCase();
-    return (d.includes('motor') || outputTypes[n] === 'pwm') && (d.includes('right') || d.includes('r'));
+    return (d.includes('motor') || outputTypes[n] === 'pwm') && (d.includes('right'));
   });
   const allMotorNames = outputNames.filter(n => {
     const d = n.toLowerCase();
