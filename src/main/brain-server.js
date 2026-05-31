@@ -1,28 +1,15 @@
 /**
- * Airone AI Backbone - Brain Server
- * Integrated WebSocket server that receives sensor data from robots,
- * processes it through the AI engine, and sends commands back.
- * 
- * Supports two message formats from robots:
- * 1. Natural Language Prompt (from ESP32 senddatato):
- *    "Currently, the input sensors read:
- *     (sensor: value, ...),
- *     What do you want to do to:
- *     (module1, module2, ...)."
- * 
- * 2. JSON (legacy/structured):
- *    {"robot_id": "...", "input_sensors_read": {...}, ...}
- * 
- * The brain always responds with JSON commands:
- *    {"output_commands": {"module_name": {"action": "...", "value": ...}}}
- * 
+ * Airone AI Backbone - Brain Server (Multi-Model)
+ * WebSocket server that hosts MULTIPLE LNN models simultaneously.
+ * Each robot gets its own model, routed by the ?robot=<name> query parameter.
+ *
  * Features:
- * - WebSocket server for robot communication
- * - Rule-based processing engine (built-in)
- * - LLM integration support (OpenAI, Claude, local LLaMA)
- * - Command history logging to SQLite
- * - Event emission to Electron renderer for live monitoring
+ * - Multi-model LNN processing (trained weights, not random)
+ * - WebSocket server with robot routing via ?robot=name query param
+ * - Rule-based fallback when no LNN model is available
+ * - LLM integration (OpenAI, Claude, LLaMA, Kimi K2.6)
  * - Emergency stop capability
+ * - Command history logging
  */
 
 const { WebSocketServer } = require('ws');
@@ -36,49 +23,141 @@ class BrainServer {
     this.host = '0.0.0.0';
     this.running = false;
     this.robotConnections = new Map(); // robot_id -> ws
-    this.emergencyStopped = new Set(); // robot_ids that are emergency stopped
-    this.eventCallback = null; // callback to send events to renderer
-    this.lastSensorData = new Map(); // robot_id -> last sensor data
+    this.emergencyStopped = new Set();
+    this.eventCallback = null;
+    this.lastSensorData = new Map();
     this.commandCounter = 0;
+
+    // Multi-model LNN support
+    this.lnnModels = new Map(); // robot_name -> LNN model config with trained weights
   }
 
-  /**
-   * Set callback for sending events to the renderer process
-   */
   setEventCallback(callback) {
     this.eventCallback = callback;
   }
 
-  /**
-   * Emit an event to the renderer
-   */
   emitEvent(eventType, data) {
     if (this.eventCallback) {
       this.eventCallback({ type: eventType, data, timestamp: Date.now() });
     }
   }
 
-  // ==================================================================
-  // NATURAL LANGUAGE PROMPT PARSER
-  // ==================================================================
+  // ==================== MULTI-MODEL LNN ====================
 
   /**
-   * Parse the natural language prompt sent by the ESP32 via senddatato.
-   * 
-   * Format:
-   *   Currently, the input sensors read:
-   *   (sensor_name: value, sensor_name: value, ...),
-   *   What do you want to do to:
-   *   (output_module_1, output_module_2, ...).
-   * 
-   * Returns structured data:
-   *   {
-   *     input_sensors_read: { sensor_name: value, ... },
-   *     output_modules_available: ["module1", "module2", ...],
-   *     _raw_prompt: "the original text",
-   *     _format: "natural_language"
-   *   }
+   * Register an LNN model for a robot.
+   * @param {string} robotName - The robot's name (used for routing)
+   * @param {Object} modelConfig - LNN model config with trained weights
    */
+  registerLnnModel(robotName, modelConfig) {
+    this.lnnModels.set(robotName.toLowerCase().replace(/[^a-z0-9]/g, '-'), modelConfig);
+    console.log(`[BrainServer] Registered LNN model for: ${robotName} (${this.lnnModels.size} total models)`);
+  }
+
+  /**
+   * Get the LNN model for a robot.
+   */
+  getLnnModel(robotName) {
+    const key = robotName.toLowerCase().replace(/[^a-z0-9]/g, '-');
+    return this.lnnModels.get(key) || null;
+  }
+
+  /**
+   * Process sensor data through the LNN model.
+   * Uses trained weights for inference.
+   */
+  processWithLNN(modelConfig, sensorData) {
+    const inputMapping = modelConfig.input_mapping || {};
+    const outputMapping = modelConfig.output_mapping || {};
+    const outputTypes = modelConfig.output_types || {};
+    const weights = modelConfig.weights || {};
+    const hiddenUnits = modelConfig.hidden_units || 16;
+    const inputSize = modelConfig.input_size;
+    const outputSize = modelConfig.output_size;
+    const params = modelConfig.neuron_params || {};
+
+    // Get weights (fallback to Xavier init)
+    const W_in = weights.W_in || this._xavierInit(hiddenUnits, inputSize);
+    const W_out = weights.W_out || this._xavierInit(outputSize, hiddenUnits);
+    const b_in = weights.b_in || new Array(hiddenUnits).fill(0);
+    const b_out = weights.b_out || new Array(outputSize).fill(0);
+
+    // Build input array from sensor data
+    const sensors = sensorData.input_sensors_read || sensorData;
+    const inputArr = new Array(inputSize).fill(0);
+    for (const [name, idx] of Object.entries(inputMapping)) {
+      if (idx < inputSize) {
+        let val = sensors[name];
+        if (val === undefined) val = 0;
+        if (typeof val === 'string') val = parseFloat(val) || 0;
+        inputArr[idx] = val;
+      }
+    }
+
+    // Forward pass: hidden = tanh(W_in * x + b_in)
+    const hidden = new Array(hiddenUnits).fill(0);
+    for (let i = 0; i < hiddenUnits; i++) {
+      let sum = b_in[i];
+      for (let j = 0; j < inputSize; j++) {
+        sum += W_in[i][j] * inputArr[j];
+      }
+      hidden[i] = Math.tanh(sum);
+    }
+
+    // Output: y = sigmoid(W_out * h + b_out)
+    const rawOutputs = new Array(outputSize).fill(0);
+    for (let i = 0; i < outputSize; i++) {
+      let sum = b_out[i];
+      for (let j = 0; j < hiddenUnits; j++) {
+        sum += W_out[i][j] * hidden[j];
+      }
+      rawOutputs[i] = this._sigmoid(sum);
+    }
+
+    // Format outputs based on output types
+    const commands = {};
+    for (const [name, idx] of Object.entries(outputMapping)) {
+      if (idx < outputSize) {
+        const rawVal = rawOutputs[idx];
+        const outType = outputTypes[name] || 'digital';
+        commands[name] = this._formatOutput(rawVal, outType);
+      }
+    }
+
+    return commands;
+  }
+
+  _sigmoid(x) {
+    if (x >= 0) return 1.0 / (1.0 + Math.exp(-x));
+    const ex = Math.exp(x);
+    return ex / (1.0 + ex);
+  }
+
+  _xavierInit(rows, cols) {
+    const limit = Math.sqrt(6.0 / (rows + cols));
+    const matrix = [];
+    for (let i = 0; i < rows; i++) {
+      const row = [];
+      for (let j = 0; j < cols; j++) {
+        row.push((Math.random() * 2 - 1) * limit);
+      }
+      matrix.push(row);
+    }
+    return matrix;
+  }
+
+  _formatOutput(rawVal, outType) {
+    if (outType === 'pwm' || outType === 'motor') {
+      return { action: 'pwm', value: Math.max(0, Math.min(255, Math.round(rawVal * 255))) };
+    } else if (outType === 'servo') {
+      return { action: 'servo', angle: Math.max(0, Math.min(180, Math.round(rawVal * 180))) };
+    } else {
+      return { action: 'digitalwrite', value: rawVal > 0.5 ? 1 : 0 };
+    }
+  }
+
+  // ==================== NATURAL LANGUAGE PARSER ====================
+
   parseNaturalLanguagePrompt(text) {
     const result = {
       input_sensors_read: {},
@@ -89,37 +168,25 @@ class BrainServer {
       ask_context: ''
     };
 
-    // Extract input sensors section
-    // Pattern: "Currently, the input sensors read:\n(sensor_data),"
-    const sensorsMatch = text.match(
-      /Currently, the input sensors read:\s*\n?\s*\(([^)]*)\)/i
-    );
+    const sensorsMatch = text.match(/Currently, the input sensors read:\s*\n?\s*\(([^)]*)\)/i);
     if (sensorsMatch) {
       const sensorText = sensorsMatch[1].trim();
       if (sensorText && !sensorText.toLowerCase().includes('no input sensors')) {
-        // Parse "sensor_name: value, sensor_name: value"
         const pairs = sensorText.split(',');
         for (const pair of pairs) {
           const trimmed = pair.trim();
           if (trimmed.includes(':')) {
             const [key, ...valParts] = trimmed.split(':');
             let val = valParts.join(':').trim();
-            // Try to convert to number
             const num = Number(val);
-            if (!isNaN(num)) {
-              val = num;
-            }
+            if (!isNaN(num)) val = num;
             result.input_sensors_read[key.trim()] = val;
           }
         }
       }
     }
 
-    // Extract output modules section
-    // Pattern: "What do you want to do to:\n(module1, module2, ...)."
-    const outputsMatch = text.match(
-      /What do you want to do to:\s*\n?\s*\(([^)]*)\)/i
-    );
+    const outputsMatch = text.match(/What do you want to do to:\s*\n?\s*\(([^)]*)\)/i);
     if (outputsMatch) {
       const outputText = outputsMatch[1].trim();
       if (outputText && !outputText.toLowerCase().includes('no output modules')) {
@@ -128,7 +195,6 @@ class BrainServer {
       }
     }
 
-    // Extract ask() question if present
     const askMatch = text.match(/Also, the robot asks:\s*(.+?)(?:\s*\(Context:\s*(.+?)\))?$/im);
     if (askMatch) {
       result.ask_question = askMatch[1].trim();
@@ -138,33 +204,17 @@ class BrainServer {
     return result;
   }
 
-  /**
-   * Parse an incoming message from a robot.
-   * Handles both JSON and natural language prompt formats.
-   */
   parseMessage(rawMessage) {
-    // Try JSON first
     try {
       const data = JSON.parse(rawMessage);
-      if (typeof data === 'object' && data !== null) {
-        return data;
-      }
-    } catch (e) {
-      // Not JSON
-    }
+      if (typeof data === 'object' && data !== null) return data;
+    } catch (_e) { }
 
-    // Not JSON — parse as natural language prompt
-    console.log('[BrainServer] Received natural language prompt from robot');
     return this.parseNaturalLanguagePrompt(rawMessage);
   }
 
-  // ==================================================================
-  // SERVER LIFECYCLE
-  // ==================================================================
+  // ==================== SERVER LIFECYCLE ====================
 
-  /**
-   * Start the WebSocket brain server
-   */
   start(port = 8080, host = '0.0.0.0') {
     if (this.running) {
       console.log('[BrainServer] Already running');
@@ -180,26 +230,35 @@ class BrainServer {
       this.wss.on('listening', () => {
         this.running = true;
         console.log(`[BrainServer] Listening on ws://${host}:${port}`);
+        console.log(`[BrainServer] LNN models loaded: ${this.lnnModels.size} (${Array.from(this.lnnModels.keys()).join(', ')})`);
         this.emitEvent('server:started', { port, host });
       });
 
       this.wss.on('connection', (ws, req) => {
         const clientIp = req.socket.remoteAddress;
-        console.log(`[BrainServer] Client connected from ${clientIp}`);
-        this.emitEvent('client:connected', { ip: clientIp });
+
+        // Extract robot name from query parameter: ?robot=name
+        let routeRobotName = 'default';
+        try {
+          const url = req.url || '/';
+          if (url.includes('?')) {
+            const queryStr = url.split('?', 2)[1];
+            const params = new URLSearchParams(queryStr);
+            routeRobotName = params.get('robot') || params.get('name') || 'default';
+          }
+        } catch (_e) { }
+
+        console.log(`[BrainServer] Client connected from ${clientIp} for robot: ${routeRobotName}`);
+        this.emitEvent('client:connected', { ip: clientIp, robot: routeRobotName });
 
         let robotId = null;
 
         ws.on('message', async (rawData) => {
           try {
             const rawStr = rawData.toString();
-            
-            // Parse message (JSON or natural language prompt)
             const message = this.parseMessage(rawStr);
-            
-            robotId = message.robot_id;
+            robotId = message.robot_id || routeRobotName;
 
-            // For natural language prompts without robot_id, assign temporary ID
             if (!robotId) {
               robotId = `robot_${Date.now() % 10000}`;
               message.robot_id = robotId;
@@ -215,69 +274,51 @@ class BrainServer {
               return;
             }
 
-            // Store connection
             this.robotConnections.set(robotId, ws);
-
-            // Store last sensor data
             this.lastSensorData.set(robotId, message);
 
-            // Log the received data
-            try {
-              db.addCommandLog(robotId, 'received', message);
-            } catch (logErr) {
-              console.error('[BrainServer] Failed to log command:', logErr.message);
-            }
+            try { db.addCommandLog(robotId, 'received', message); } catch (_e) { }
 
-            // Emit sensor data to renderer
-            this.emitEvent('sensor:data', { 
-              robotId, 
-              data: message, 
-              format: message._format || 'json' 
-            });
+            this.emitEvent('sensor:data', { robotId, data: message, format: message._format || 'json' });
 
-            // Get robot config for AI processing
-            let robot = null;
-            try {
-              robot = db.getRobot(robotId);
-            } catch (e) {
-              // Robot might not be in DB - continue with defaults
-            }
+            // Try LNN model first (if available for this robot)
+            const lnnModel = this.getLnnModel(robotId) || this.getLnnModel(routeRobotName);
+            let commands;
 
-            // Process with AI
-            let aiConfig = null;
-            if (robot) {
-              try {
-                aiConfig = db.getActiveAiConfig(robot.id);
-              } catch (e) {
-                // No AI config - use rule-based
+            if (lnnModel) {
+              // Process with trained LNN
+              commands = this.processWithLNN(lnnModel, message);
+              console.log(`[BrainServer] Processed with LNN for ${robotId}: ${Object.keys(commands).length} commands`);
+            } else {
+              // Fall back to AI/rule-based processing
+              let robot = null;
+              try { robot = db.getRobot(robotId); } catch (_e) { }
+
+              let aiConfig = null;
+              if (robot) {
+                try { aiConfig = db.getActiveAiConfig(robot.id); } catch (_e) { }
               }
+
+              commands = await this.processWithAI(robot, message, aiConfig);
             }
 
-            const commands = await this.processWithAI(robot, message, aiConfig);
-
-            // Build response (always JSON commands)
             const response = {
               command_id: `cmd_${++this.commandCounter}`,
               timestamp: Date.now(),
               output_commands: commands,
               metadata: {
                 confidence: 0.85,
-                reasoning: `Processed ${Object.keys(message.input_sensors_read || {}).length} sensors, issued ${Object.keys(commands).length} commands`,
-                format: message._format || 'json'
+                reasoning: lnnModel
+                  ? `LNN inference for ${robotId} (${lnnModel.input_size}in/${lnnModel.output_size}out)`
+                  : `Processed ${Object.keys(message.input_sensors_read || {}).length} sensors, issued ${Object.keys(commands).length} commands`,
+                format: message._format || 'json',
+                model: lnnModel ? 'lnn' : 'rule-based'
               }
             };
 
-            // Send response to robot
             ws.send(JSON.stringify(response));
 
-            // Log the sent command
-            try {
-              db.addCommandLog(robotId, 'sent', response);
-            } catch (logErr) {
-              console.error('[BrainServer] Failed to log response:', logErr.message);
-            }
-
-            // Emit command event to renderer
+            try { db.addCommandLog(robotId, 'sent', response); } catch (_e) { }
             this.emitEvent('command:sent', { robotId, response });
 
           } catch (parseErr) {
@@ -312,13 +353,9 @@ class BrainServer {
     }
   }
 
-  /**
-   * Stop the brain server
-   */
   stop() {
     if (!this.running) return { success: false, error: 'Server not running' };
 
-    // Close all robot connections
     for (const [robotId, ws] of this.robotConnections) {
       ws.close(1001, 'Server shutting down');
     }
@@ -336,9 +373,6 @@ class BrainServer {
     return { success: true };
   }
 
-  /**
-   * Get current server status
-   */
   getStatus() {
     return {
       running: this.running,
@@ -346,6 +380,7 @@ class BrainServer {
       port: this.port,
       connectedRobots: Array.from(this.robotConnections.keys()),
       emergencyStopped: Array.from(this.emergencyStopped),
+      lnnModels: Array.from(this.lnnModels.keys()),
       lastSensorData: Object.fromEntries(
         Array.from(this.lastSensorData.entries()).map(([id, data]) => [id, {
           timestamp: data.timestamp || Date.now(),
@@ -356,13 +391,9 @@ class BrainServer {
     };
   }
 
-  /**
-   * Emergency stop a specific robot (or all)
-   */
   emergencyStop(robotId = null) {
     if (robotId) {
       this.emergencyStopped.add(robotId);
-      // Send stop command to robot
       const ws = this.robotConnections.get(robotId);
       if (ws && ws.readyState === 1) {
         ws.send(JSON.stringify({
@@ -372,9 +403,7 @@ class BrainServer {
         }));
       }
       this.emitEvent('emergency:stop', { robotId });
-      console.log(`[BrainServer] EMERGENCY STOP for robot ${robotId}`);
     } else {
-      // Stop all robots
       for (const [id, ws] of this.robotConnections) {
         this.emergencyStopped.add(id);
         if (ws.readyState === 1) {
@@ -386,38 +415,24 @@ class BrainServer {
         }
       }
       this.emitEvent('emergency:stop', { robotId: 'ALL' });
-      console.log('[BrainServer] EMERGENCY STOP - ALL ROBOTS');
     }
     return { success: true };
   }
 
-  /**
-   * Release emergency stop for a robot
-   */
   releaseEmergencyStop(robotId) {
     this.emergencyStopped.delete(robotId);
     this.emitEvent('emergency:released', { robotId });
     return { success: true };
   }
 
-  // ==================================================================
-  // AI PROCESSING
-  // ==================================================================
+  // ==================== AI PROCESSING (FALLBACK) ====================
 
-  /**
-   * Process sensor data with the configured AI model
-   */
   async processWithAI(robot, sensorData, aiConfig) {
     const modelType = aiConfig?.model_type || robot?.ai_model || 'rule-based';
 
-    // Get pin definitions for context
     let pins = [];
     if (robot) {
-      try {
-        pins = db.getPins(robot.id);
-      } catch (e) {
-        // No pins available
-      }
+      try { pins = db.getPins(robot.id); } catch (_e) { }
     }
 
     const pinContext = pins.map(p =>
@@ -429,6 +444,8 @@ class BrainServer {
         return await this.processWithGPT4(robot, sensorData, aiConfig, pinContext);
       case 'claude':
         return await this.processWithClaude(robot, sensorData, aiConfig, pinContext);
+      case 'kimi-k2.6':
+        return await this.processWithKimi(robot, sensorData, aiConfig, pinContext);
       case 'llama3':
       case 'llama':
         return await this.processWithLLaMA(robot, sensorData, aiConfig, pinContext);
@@ -440,133 +457,91 @@ class BrainServer {
     }
   }
 
-  /**
-   * Rule-based processing engine (built-in, no API needed)
-   * Works directly on structured sensor data parsed from the natural language prompt.
-   */
   processWithRules(robot, sensorData, pins) {
     const commands = {};
     const sensors = sensorData.input_sensors_read || {};
     const available = sensorData.output_modules_available || [];
 
-    // Temperature rule: if temp > 30, turn on LED warning
     const temp = sensors.temperature || sensors.temperature_sensor || 0;
     if (temp > 30 && (available.includes('ledpin') || pins.some(p => p.pin_name === 'ledpin'))) {
       commands.ledpin = { action: 'digitalwrite', value: 1 };
-      this.emitEvent('rule:triggered', { rule: 'high_temperature', sensor: 'temperature', value: temp });
-    } else if (temp < 25 && temp > 0 && (available.includes('ledpin') || pins.some(p => p.pin_name === 'ledpin'))) {
-      commands.ledpin = { action: 'digitalwrite', value: 0 };
     }
 
-    // Ultrasonic rule: if distance < 50cm, reach (move arm)
     const distance = sensors.ultrasonic || sensors.distance || 999;
     if (distance < 50 && (available.includes('urhands') || pins.some(p => p.pin_name === 'urhands'))) {
       commands.urhands = { action: 'servo', angle: 45 };
-      this.emitEvent('rule:triggered', { rule: 'object_close', sensor: 'ultrasonic', value: distance });
-    } else if (distance > 100 && (available.includes('urhands') || pins.some(p => p.pin_name === 'urhands'))) {
-      commands.urhands = { action: 'servo', angle: 0 };
-    }
-
-    // Camera detection: if object detected, signal
-    const cameraData = sensors.camera || sensors.object_detected;
-    if (cameraData && (available.includes('ledpin') || pins.some(p => p.pin_name === 'ledpin'))) {
-      if (cameraData !== 'none' && cameraData !== 0) {
-        commands.ledpin = { action: 'digitalwrite', value: 1 };
-      }
-    }
-
-    // Microphone: if voice command detected
-    const micData = sensors.microphone || sensors.voice_command;
-    if (micData && micData !== 'none' && micData !== '') {
-      this.emitEvent('rule:triggered', { rule: 'voice_command', sensor: 'microphone', value: micData });
-    }
-
-    // Walking demo: cycle leg movement
-    if (available.includes('llleg') || pins.some(p => p.pin_name === 'llleg')) {
-      const angle = Math.floor(Math.random() * 60) + 30;
-      commands.llleg = { action: 'servo', angle };
     }
 
     return commands;
   }
 
-  /**
-   * Process with OpenAI GPT-4
-   * Sends the natural language prompt from the ESP32 to GPT-4.
-   */
-  async processWithGPT4(robot, sensorData, aiConfig, pinContext) {
-    if (!aiConfig?.api_key) {
-      console.warn('[BrainServer] No API key for GPT-4, falling back to rules');
-      return this.processWithRules(robot, sensorData, []);
-    }
-
+  async processWithKimi(robot, sensorData, aiConfig, pinContext) {
+    const nvidiaClient = require('./nvidia-client');
     const prompt = this.buildPrompt(robot, sensorData, pinContext);
 
     try {
-      const response = await axios.post('https://api.openai.com/v1/chat/completions', {
-        model: 'gpt-4',
+      const content = await nvidiaClient.sendChatCompletion({
         messages: [
-          { role: 'system', content: 'You are a robot control AI. You receive sensor data as a natural language prompt and respond with valid JSON mapping module names to command objects with action and value/angle fields.' },
+          { role: 'system', content: 'You are a robot control AI. Respond with ONLY valid JSON mapping module names to command objects with action and value/angle fields.' },
           { role: 'user', content: prompt }
         ],
-        temperature: 0.1,
-        max_tokens: 500
-      }, {
-        headers: { 'Authorization': `Bearer ${aiConfig.api_key}` },
-        timeout: 10000
+        model: 'moonshotai/kimi-k2.6'
       });
 
-      const content = response.data.choices[0].message.content;
-      return JSON.parse(content);
-    } catch (err) {
-      console.error('[BrainServer] GPT-4 error:', err.message);
-      return this.processWithRules(robot, sensorData, []);
-    }
-  }
-
-  /**
-   * Process with Anthropic Claude
-   * Sends the natural language prompt from the ESP32 to Claude.
-   */
-  async processWithClaude(robot, sensorData, aiConfig, pinContext) {
-    if (!aiConfig?.api_key) {
-      console.warn('[BrainServer] No API key for Claude, falling back to rules');
-      return this.processWithRules(robot, sensorData, []);
-    }
-
-    const prompt = this.buildPrompt(robot, sensorData, pinContext);
-
-    try {
-      const response = await axios.post('https://api.anthropic.com/v1/messages', {
-        model: 'claude-3-5-sonnet-20241022',
-        max_tokens: 500,
-        system: 'You are a robot control AI. You receive sensor data as a natural language prompt and respond with valid JSON mapping module names to command objects with action and value/angle fields.',
-        messages: [{ role: 'user', content: prompt }]
-      }, {
-        headers: {
-          'x-api-key': aiConfig.api_key,
-          'anthropic-version': '2023-06-01',
-          'Content-Type': 'application/json'
-        },
-        timeout: 10000
-      });
-
-      const content = response.data.content[0].text;
       const jsonMatch = content.match(/\{[\s\S]*\}/);
       if (jsonMatch) {
         return JSON.parse(jsonMatch[0]);
       }
       return this.processWithRules(robot, sensorData, []);
     } catch (err) {
-      console.error('[BrainServer] Claude error:', err.message);
+      console.error('[BrainServer] Kimi error:', err.message);
       return this.processWithRules(robot, sensorData, []);
     }
   }
 
-  /**
-   * Process with local LLaMA (via Ollama)
-   * Sends the natural language prompt from the ESP32 to local LLaMA.
-   */
+  async processWithGPT4(robot, sensorData, aiConfig, pinContext) {
+    if (!aiConfig?.api_key) return this.processWithRules(robot, sensorData, []);
+    const prompt = this.buildPrompt(robot, sensorData, pinContext);
+
+    try {
+      const response = await axios.post('https://api.openai.com/v1/chat/completions', {
+        model: 'gpt-4',
+        messages: [
+          { role: 'system', content: 'You are a robot control AI. Respond with valid JSON mapping module names to command objects.' },
+          { role: 'user', content: prompt }
+        ],
+        temperature: 0.1,
+        max_tokens: 500
+      }, { headers: { 'Authorization': `Bearer ${aiConfig.api_key}` }, timeout: 10000 });
+
+      return JSON.parse(response.data.choices[0].message.content);
+    } catch (err) {
+      return this.processWithRules(robot, sensorData, []);
+    }
+  }
+
+  async processWithClaude(robot, sensorData, aiConfig, pinContext) {
+    if (!aiConfig?.api_key) return this.processWithRules(robot, sensorData, []);
+    const prompt = this.buildPrompt(robot, sensorData, pinContext);
+
+    try {
+      const response = await axios.post('https://api.anthropic.com/v1/messages', {
+        model: 'claude-3-5-sonnet-20241022',
+        max_tokens: 500,
+        system: 'You are a robot control AI. Respond with valid JSON mapping module names to command objects.',
+        messages: [{ role: 'user', content: prompt }]
+      }, {
+        headers: { 'x-api-key': aiConfig.api_key, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' },
+        timeout: 10000
+      });
+
+      const jsonMatch = response.data.content[0].text.match(/\{[\s\S]*\}/);
+      return jsonMatch ? JSON.parse(jsonMatch[0]) : this.processWithRules(robot, sensorData, []);
+    } catch (err) {
+      return this.processWithRules(robot, sensorData, []);
+    }
+  }
+
   async processWithLLaMA(robot, sensorData, aiConfig, pinContext) {
     const endpoint = aiConfig?.endpoint || 'http://localhost:11434';
     const prompt = this.buildPrompt(robot, sensorData, pinContext);
@@ -574,127 +549,67 @@ class BrainServer {
     try {
       const response = await axios.post(`${endpoint}/api/generate`, {
         model: 'llama3',
-        prompt: `You are a robot control AI. You receive sensor data as a natural language prompt and respond ONLY with valid JSON mapping module names to command objects.\n\n${prompt}`,
+        prompt: `Robot control AI. Respond ONLY with valid JSON.\n\n${prompt}`,
         stream: false,
         options: { temperature: 0.1 }
       }, { timeout: 30000 });
 
-      const content = response.data.response;
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        return JSON.parse(jsonMatch[0]);
-      }
-      return this.processWithRules(robot, sensorData, []);
+      const jsonMatch = response.data.response.match(/\{[\s\S]*\}/);
+      return jsonMatch ? JSON.parse(jsonMatch[0]) : this.processWithRules(robot, sensorData, []);
     } catch (err) {
-      console.error('[BrainServer] LLaMA error:', err.message);
       return this.processWithRules(robot, sensorData, []);
     }
   }
 
-  /**
-   * Process with custom endpoint
-   */
   async processWithCustom(robot, sensorData, aiConfig, pinContext) {
     const endpoint = aiConfig?.endpoint;
-    if (!endpoint) {
-      return this.processWithRules(robot, sensorData, []);
-    }
+    if (!endpoint) return this.processWithRules(robot, sensorData, []);
 
     try {
       const response = await axios.post(endpoint, {
-        robot: robot ? { name: robot.name, type: robot.type, purpose: robot.purpose } : null,
+        robot: robot ? { name: robot.name, type: robot.type } : null,
         sensor_data: sensorData,
-        pin_context: pinContext,
-        raw_prompt: sensorData._raw_prompt || null
-      }, {
-        headers: aiConfig.api_key ? { 'Authorization': `Bearer ${aiConfig.api_key}` } : {},
-        timeout: 10000
-      });
+        pin_context: pinContext
+      }, { headers: aiConfig.api_key ? { 'Authorization': `Bearer ${aiConfig.api_key}` } : {}, timeout: 10000 });
+
       return response.data.commands || response.data.output_commands || {};
     } catch (err) {
-      console.error('[BrainServer] Custom endpoint error:', err.message);
       return this.processWithRules(robot, sensorData, []);
     }
   }
 
-  /**
-   * Build AI prompt from robot context.
-   * 
-   * If the ESP32 sent a natural language prompt, we pass it through directly
-   * and add robot identity and hardware descriptions as context.
-   * The AI reads: "Currently, the input sensors read: (...), What do you want to do to: (...)"
-   * and responds with JSON commands.
-   */
   buildPrompt(robot, sensorData, pinContext) {
     const rawPrompt = sensorData._raw_prompt || '';
-    
-    if (rawPrompt) {
-      // The ESP32 sent a natural language prompt — use it directly
-      let prompt = '';
-      
-      if (robot) {
-        prompt += `You are controlling a ${robot.type || 'unknown'} robot named ${robot.name || 'unknown'}.\n`;
-        if (robot.purpose) prompt += `Purpose: ${robot.purpose}\n`;
-        if (robot.environment) prompt += `Environment: ${robot.environment}\n`;
-        prompt += '\n';
-      }
-      
-      if (pinContext) {
-        prompt += `Available hardware:\n${pinContext}\n\n`;
-      }
-      
-      // The actual sensor data prompt from the ESP32
-      prompt += rawPrompt;
-      
-      prompt += '\n\nRespond with ONLY a JSON object mapping module names to commands.\n';
-      prompt += 'Example: {"ledpin": {"action": "digitalwrite", "value": 1}, "urhands": {"action": "servo", "angle": 45}}';
-      
-      return prompt;
-    }
-    
-    // Fallback: build structured prompt from sensor data
     let prompt = '';
-    
+
     if (robot) {
       prompt += `You are controlling a ${robot.type || 'unknown'} robot named ${robot.name || 'unknown'}.\n`;
       if (robot.purpose) prompt += `Purpose: ${robot.purpose}\n`;
-      if (robot.environment) prompt += `Environment: ${robot.environment}\n`;
       prompt += '\n';
     }
-    
-    if (pinContext) {
-      prompt += `Available hardware:\n${pinContext}\n\n`;
-    }
-    
-    // Build the natural language format from structured data
-    const sensors = sensorData.input_sensors_read || {};
-    const available = sensorData.output_modules_available || [];
-    
-    prompt += 'Currently, the input sensors read:\n';
-    if (Object.keys(sensors).length > 0) {
-      const sensorStr = Object.entries(sensors)
-        .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`)
-        .join(', ');
-      prompt += `(${sensorStr}),\n`;
+
+    if (pinContext) prompt += `Available hardware:\n${pinContext}\n\n`;
+
+    if (rawPrompt) {
+      prompt += rawPrompt;
     } else {
-      prompt += '(No sensor data),\n';
+      const sensors = sensorData.input_sensors_read || {};
+      const available = sensorData.output_modules_available || [];
+
+      prompt += 'Currently, the input sensors read:\n';
+      prompt += Object.keys(sensors).length > 0
+        ? `(${Object.entries(sensors).map(([k, v]) => `${k}: ${v}`).join(', ')}),\n`
+        : '(No sensor data),\n';
+
+      prompt += 'What do you want to do to:\n';
+      prompt += available.length > 0 ? `(${available.join(', ')}).` : '(No output modules available).';
     }
-    
-    prompt += 'What do you want to do to:\n';
-    if (available.length > 0) {
-      prompt += `(${available.join(', ')}).`;
-    } else {
-      prompt += '(No output modules available).';
-    }
-    
-    prompt += '\n\nRespond with ONLY a JSON object mapping module names to commands.\n';
-    prompt += 'Example: {"ledpin": {"action": "digitalwrite", "value": 1}, "urhands": {"action": "servo", "angle": 45}}';
-    
+
+    prompt += '\n\nRespond with ONLY a JSON object mapping module names to commands.';
     return prompt;
   }
 }
 
-// Singleton instance
 const brainServer = new BrainServer();
 
 module.exports = brainServer;

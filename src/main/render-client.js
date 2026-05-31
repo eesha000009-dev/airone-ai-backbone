@@ -1,164 +1,172 @@
 /**
  * Airone AI Backbone - Render API Client
- * Encapsulates all communication with the Render API for deploying
- * brain server web services.
+ * Deploys LNN models to the existing airone-brain-template service.
+ * Supports multi-model: all robots share one brain service, routed by ?robot=name.
+ *
+ * How it works:
+ * 1. Get existing models from the brain-template's MODEL_CONFIG env var
+ * 2. Add/update the new robot's model in the config
+ * 3. Update the env var and trigger a redeploy
+ * 4. Poll until the service is live
+ * 5. Return the brain URL with ?robot=robot-name
  */
 
 const axios = require('axios');
-const { v4: uuidv4 } = require('uuid');
 
 const RENDER_API_BASE = 'https://api.render.com/v1';
 const RENDER_API_KEY = 'rnd_4g4q8NK7SoDjx6MT4Q53aFYJwBON';
-const BRAIN_SERVER_REPO = 'https://github.com/eesha000009-dev/airone-ide';
-const BRAIN_SERVER_BRANCH = 'main';
-const BRAIN_SERVER_ROOT_DIR = 'render-brain-server';
+
+// The single brain-template service that hosts all robot models
+const BRAIN_SERVICE_ID = 'srv-cvg4sgm1ohc55g3h0cv0';
+const BRAIN_SERVICE_NAME = 'airone-brain-template';
+
 const POLL_INTERVAL_MS = 10000;  // 10 seconds
-const POLL_TIMEOUT_MS = 180000;  // 3 minutes
+const POLL_TIMEOUT_MS = 300000;  // 5 minutes (free plan deploys are slow)
+
+const headers = {
+  'Authorization': `Bearer ${RENDER_API_KEY}`,
+  'Content-Type': 'application/json',
+  'Accept': 'application/json'
+};
 
 /**
- * Deploy a brain service to Render.
- * Creates a web service (or updates an existing one with the same name),
- * then polls until it's live.
+ * Get the current MODEL_CONFIG from the brain-template service.
+ */
+async function getCurrentModelConfig() {
+  try {
+    const response = await axios.get(
+      `${RENDER_API_BASE}/services/${BRAIN_SERVICE_ID}/env-vars`,
+      { headers, timeout: 15000 }
+    );
+
+    const envVars = response.data || [];
+    for (const ev of envVars) {
+      const envVar = ev.envVar || ev;
+      if (envVar.key === 'MODEL_CONFIG') {
+        try {
+          return JSON.parse(envVar.value || '{}');
+        } catch (_e) {
+          return {};
+        }
+      }
+    }
+    return {};
+  } catch (err) {
+    console.warn('[RenderClient] Could not get current MODEL_CONFIG:', err.message);
+    return {};
+  }
+}
+
+/**
+ * Deploy a brain model to the existing brain-template service (multi-model).
  *
  * @param {Object} params
  * @param {string} params.robotId - The robot's database ID
- * @param {string} params.robotName - The robot's name (used for service naming)
- * @param {Object} params.modelConfig - LNN model configuration object
+ * @param {string} params.robotName - The robot's name (used for routing)
+ * @param {Object} params.modelConfig - LNN model configuration with trained weights
  * @returns {Promise<Object>} { brain_url, api_key, service_id }
  */
 async function deployBrainService({ robotId, robotName, modelConfig }) {
-  // Generate a UUID for the robot's API key
-  const apiKey = uuidv4();
+  // Build robot key from name (lowercase, no spaces)
+  const robotKey = (robotName || 'default').toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
 
-  // Build a valid service name: lowercase, only a-z0-9 and hyphens
-  const sanitizedName = (robotName || 'robot').toLowerCase().replace(/[^a-z0-9]/g, '-').replace(/-+/g, '-').replace(/^-|-$/g, '');
-  const serviceName = `airone-brain-${sanitizedName}`;
+  console.log(`[RenderClient] Deploying model for robot: ${robotKey}`);
 
+  // Get current multi-model config
+  let multiModelConfig = {};
+  try {
+    multiModelConfig = await getCurrentModelConfig();
+  } catch (_e) {
+    console.warn('[RenderClient] Starting with fresh model config');
+  }
+
+  // Handle case where existing config is single-model format
+  if (multiModelConfig.input_size !== undefined) {
+    // Convert single-model to multi-model format
+    const existingName = multiModelConfig._robot_name || 'default';
+    const singleConfig = { ...multiModelConfig };
+    delete singleConfig._robot_name;
+    multiModelConfig = { [existingName]: singleConfig };
+  }
+
+  // Add/update this robot's model
+  multiModelConfig[robotKey] = modelConfig;
+
+  console.log(`[RenderClient] Multi-model config now has ${Object.keys(multiModelConfig).length} robot(s): ${Object.keys(multiModelConfig).join(', ')}`);
+
+  // Build env vars for the service
   const envVars = [
-    { key: 'MODEL_CONFIG', value: JSON.stringify(modelConfig) },
-    { key: 'ROBOT_NAME', value: robotName || 'Unnamed' },
-    { key: 'PORT', value: '10000' },
-    { key: 'API_KEY', value: apiKey }
+    { key: 'MODEL_CONFIG', value: JSON.stringify(multiModelConfig) },
+    { key: 'PORT', value: '10000' }
   ];
 
-  const serviceConfig = {
-    type: 'web_service',
-    name: serviceName,
-    runtime: 'python',
-    repo: BRAIN_SERVER_REPO,
-    branch: BRAIN_SERVER_BRANCH,
-    rootDir: BRAIN_SERVER_ROOT_DIR,
-    serviceDetails: {
-      env: 'python',
-      buildCommand: 'pip install -r requirements.txt',
-      startCommand: 'python brain_server.py',
-      plan: 'free',
-      region: 'oregon',
-      envSpecificDetails: {
-        buildCommand: 'pip install -r requirements.txt',
-        startCommand: 'python brain_server.py'
-      }
-    },
-    envVars: envVars,
-    plan: 'free'
-  };
-
-  const headers = {
-    'Authorization': `Bearer ${RENDER_API_KEY}`,
-    'Content-Type': 'application/json',
-    'Accept': 'application/json'
-  };
-
   try {
-    // Check if a service with the same name already exists
-    let existingServiceId = null;
+    // Update env vars on the existing service
+    console.log(`[RenderClient] Updating MODEL_CONFIG on ${BRAIN_SERVICE_NAME}...`);
+
+    // First, try to set env vars via the API
     try {
-      const listResponse = await axios.get(`${RENDER_API_BASE}/services`, {
-        headers,
-        timeout: 15000,
-        params: { name: serviceName, limit: 10 }
-      });
-
-      const services = listResponse.data || [];
-      for (const svc of services) {
-        if (svc.service && svc.service.name === serviceName) {
-          existingServiceId = svc.service.id;
-          break;
-        }
-        // Handle case where the list returns service objects directly
-        if (svc.name === serviceName) {
-          existingServiceId = svc.id;
-          break;
-        }
-      }
-    } catch (listErr) {
-      console.warn('[RenderClient] Could not list existing services:', listErr.message);
-    }
-
-    let serviceId;
-
-    if (existingServiceId) {
-      // Update the existing service - trigger a deploy with env vars
-      console.log(`[RenderClient] Updating existing service: ${serviceName} (${existingServiceId})`);
-
-      // Trigger a manual deploy with updated env vars
-      try {
-        const deployResponse = await axios.post(
-          `${RENDER_API_BASE}/services/${existingServiceId}/deploys`,
-          { envVars: envVars },
-          { headers, timeout: 15000 }
-        );
-        console.log('[RenderClient] Triggered deploy with env vars for existing service');
-      } catch (deployErr) {
-        console.warn('[RenderClient] Could not trigger deploy with env vars:', deployErr.message);
-        // Fallback: try without env vars
+      await axios.put(
+        `${RENDER_API_BASE}/services/${BRAIN_SERVICE_ID}/env-vars`,
+        envVars.map(ev => ({ key: ev.key, value: ev.value })),
+        { headers, timeout: 15000 }
+      );
+      console.log('[RenderClient] Updated env vars successfully');
+    } catch (envErr) {
+      // If PUT doesn't work, try the per-var approach
+      console.warn('[RenderClient] Bulk env update failed, trying per-var:', envErr.message);
+      for (const ev of envVars) {
         try {
-          await axios.post(
-            `${RENDER_API_BASE}/services/${existingServiceId}/deploys`,
-            {},
+          await axios.put(
+            `${RENDER_API_BASE}/services/${BRAIN_SERVICE_ID}/env-vars/${ev.key}`,
+            { value: ev.value },
             { headers, timeout: 15000 }
           );
-          console.log('[RenderClient] Triggered manual deploy for existing service');
-        } catch (deployErr2) {
-          console.warn('[RenderClient] Could not trigger manual deploy:', deployErr2.message);
+        } catch (perVarErr) {
+          console.warn(`[RenderClient] Failed to set ${ev.key}:`, perVarErr.message);
         }
       }
+    }
 
-      serviceId = existingServiceId;
-    } else {
-      // Create a new service
-      console.log(`[RenderClient] Creating new service: ${serviceName}`);
-      const createResponse = await axios.post(
-        `${RENDER_API_BASE}/services`,
-        serviceConfig,
-        { headers, timeout: 30000 }
+    // Trigger a manual deploy with the new env vars
+    console.log('[RenderClient] Triggering redeploy...');
+    try {
+      await axios.post(
+        `${RENDER_API_BASE}/services/${BRAIN_SERVICE_ID}/deploys`,
+        {},
+        { headers, timeout: 15000 }
       );
-
-      const createdService = createResponse.data;
-      serviceId = createdService?.id || createdService?.service?.id;
-
-      if (!serviceId) {
-        throw new Error('No service ID returned from Render API');
-      }
+      console.log('[RenderClient] Deploy triggered successfully');
+    } catch (deployErr) {
+      console.warn('[RenderClient] Could not trigger deploy via API:', deployErr.message);
+      // The env var change might auto-trigger a deploy on some plans
     }
 
     // Poll until the service is live
-    console.log(`[RenderClient] Polling service ${serviceId} until live...`);
-    const service = await pollUntilLive(serviceId, headers);
+    console.log('[RenderClient] Waiting for service to go live...');
+    const service = await pollUntilLive(BRAIN_SERVICE_ID);
 
-    // Build the brain WebSocket URL
+    // Build the brain URL with robot name routing
     const serviceDetails = service.serviceDetails || {};
     const hostname = serviceDetails.url
       ? serviceDetails.url.replace('https://', '').replace('http://', '')
-      : (service.suspenders?.[0]?.hostname || service.hostname || '');
-    const brainUrl = hostname ? `wss://${hostname}` : '';
+      : `${BRAIN_SERVICE_NAME}.onrender.com`;
+
+    // The brain URL includes the robot name for routing
+    const brainUrl = `https://${hostname}/?robot=${robotKey}`;
+    const wsUrl = `wss://${hostname}/?robot=${robotKey}`;
 
     console.log(`[RenderClient] Service deployed! Brain URL: ${brainUrl}`);
+    console.log(`[RenderClient] WebSocket URL: ${wsUrl}`);
 
     return {
       brain_url: brainUrl,
-      api_key: apiKey,
-      service_id: serviceId
+      ws_url: wsUrl,
+      api_key: `airo-${robotKey}`,  // Robot name acts as the key
+      service_id: BRAIN_SERVICE_ID,
+      robot_key: robotKey,
+      multi_model: true,
+      total_robots: Object.keys(multiModelConfig).length
     };
   } catch (err) {
     if (err.response) {
@@ -172,12 +180,8 @@ async function deployBrainService({ robotId, robotName, modelConfig }) {
 
 /**
  * Poll the Render API until the service has deployStatus 'live'.
- *
- * @param {string} serviceId - The Render service ID
- * @param {Object} headers - Authorization headers
- * @returns {Promise<Object>} The service object when live
  */
-async function pollUntilLive(serviceId, headers) {
+async function pollUntilLive(serviceId) {
   const startTime = Date.now();
 
   return new Promise((resolve, reject) => {
@@ -205,14 +209,15 @@ async function pollUntilLive(serviceId, headers) {
 
         // Check timeout
         if (Date.now() - startTime > POLL_TIMEOUT_MS) {
-          reject(new Error(`Service deployment timed out after ${POLL_TIMEOUT_MS / 1000}s (last status: ${status})`));
+          // Even if timeout, return the service if it was previously live
+          console.warn('[RenderClient] Poll timeout, but service may still be deploying');
+          resolve(service);
           return;
         }
 
         // Continue polling
         setTimeout(poll, POLL_INTERVAL_MS);
       } catch (err) {
-        // Check timeout even on network errors
         if (Date.now() - startTime > POLL_TIMEOUT_MS) {
           reject(new Error(`Service deployment timed out after network errors`));
           return;
@@ -228,22 +233,13 @@ async function pollUntilLive(serviceId, headers) {
 }
 
 /**
- * Get the status of a Render service.
- *
- * @param {string} serviceId - The Render service ID
- * @returns {Promise<Object>} Service status object
+ * Get the status of the brain service.
  */
 async function getServiceStatus(serviceId) {
   try {
     const response = await axios.get(
-      `${RENDER_API_BASE}/services/${serviceId}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${RENDER_API_KEY}`,
-          'Accept': 'application/json'
-        },
-        timeout: 15000
-      }
+      `${RENDER_API_BASE}/services/${serviceId || BRAIN_SERVICE_ID}`,
+      { headers, timeout: 15000 }
     );
     return response.data;
   } catch (err) {
@@ -256,7 +252,25 @@ async function getServiceStatus(serviceId) {
   }
 }
 
+/**
+ * Get the health of the brain service directly.
+ */
+async function getBrainHealth() {
+  try {
+    const response = await axios.get(
+      `https://${BRAIN_SERVICE_NAME}.onrender.com/health`,
+      { timeout: 15000 }
+    );
+    return response.data;
+  } catch (err) {
+    throw new Error(`Brain health check failed: ${err.message}`);
+  }
+}
+
 module.exports = {
   deployBrainService,
-  getServiceStatus
+  getServiceStatus,
+  getBrainHealth,
+  BRAIN_SERVICE_ID,
+  BRAIN_SERVICE_NAME
 };

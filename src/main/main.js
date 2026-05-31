@@ -1,8 +1,11 @@
 /**
  * Airone AI Backbone - Main Process
- * Electron main process that creates the browser window,
- * sets up IPC handlers, starts the brain server, and manages
- * the application lifecycle.
+ * Electron main process with IPC handlers for:
+ * - Robot/Pin/Config CRUD operations
+ * - AI Chat (Kimi K2.6)
+ * - LNN Generation + Training + Verification (multi-step)
+ * - Multi-model deployment to Render
+ * - Brain server with LNN model registration
  */
 
 const { app, BrowserWindow, ipcMain, dialog, Menu } = require('electron');
@@ -15,9 +18,6 @@ const renderClient = require('./render-client');
 
 let mainWindow = null;
 
-/**
- * Create the main application window
- */
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1400,
@@ -33,33 +33,24 @@ function createWindow() {
       sandbox: false
     },
     icon: path.join(__dirname, '../../build/icon.png'),
-    show: false // Show when ready
+    show: false
   });
 
-  // Load the renderer
   const isDev = process.env.NODE_ENV === 'development';
   if (isDev) {
     mainWindow.loadURL('http://localhost:9000');
     mainWindow.webContents.openDevTools({ mode: 'detach' });
   } else {
-    // Load from built files
     const rendererPath = path.join(__dirname, '../renderer/dist/index.html');
     mainWindow.loadFile(rendererPath);
   }
 
-  // Show window when ready to prevent visual flash
-  mainWindow.once('ready-to-show', () => {
-    mainWindow.show();
-  });
+  mainWindow.once('ready-to-show', () => { mainWindow.show(); });
+  mainWindow.on('closed', () => { mainWindow = null; });
 
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
-
-  // Set up brain server event forwarding to renderer
+  // Forward brain server events to renderer
   brainServer.setEventCallback((event) => {
     if (mainWindow && !mainWindow.isDestroyed()) {
-      // Route events to specific channels for the renderer
       switch (event.type) {
         case 'sensor:data':
           mainWindow.webContents.send('brain:sensorData', event);
@@ -79,19 +70,12 @@ function createWindow() {
   });
 }
 
-/**
- * Set up the application menu
- */
 function createMenu() {
   const template = [
     {
       label: 'File',
       submenu: [
-        {
-          label: 'Import .airo File',
-          accelerator: 'CmdOrCtrl+O',
-          click: () => handleOpenAiroFile()
-        },
+        { label: 'Import .airo File', accelerator: 'CmdOrCtrl+O', click: () => handleOpenAiroFile() },
         { type: 'separator' },
         { role: 'quit' }
       ]
@@ -113,44 +97,24 @@ function createMenu() {
     {
       label: 'Help',
       submenu: [
-        {
-          label: 'About Airone AI Backbone',
-          click: () => {
-            dialog.showMessageBox(mainWindow, {
-              type: 'info',
-              title: 'About',
-              message: 'Airone AI Backbone v0.1.0',
-              detail: 'Desktop application for robot AI control.\nPart of the Airone Robotics System.'
-            });
-          }
-        }
+        { label: 'About Airone AI Backbone', click: () => { dialog.showMessageBox(mainWindow, { type: 'info', title: 'About', message: 'Airone AI Backbone v0.2.0', detail: 'Multi-model LNN robot control.\nPart of the Airone Robotics System.' }); } }
       ]
     }
   ];
 
-  const menu = Menu.buildFromTemplate(template);
-  Menu.setApplicationMenu(menu);
+  Menu.setApplicationMenu(Menu.buildFromTemplate(template));
 }
 
-/**
- * Handle opening .airo files
- */
 async function handleOpenAiroFile() {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: 'Import .airo File',
-    filters: [
-      { name: 'Airone Robot Files', extensions: ['airo'] },
-      { name: 'All Files', extensions: ['*'] }
-    ],
+    filters: [{ name: 'Airone Robot Files', extensions: ['airo'] }, { name: 'All Files', extensions: ['*'] }],
     properties: ['openFile']
   });
-
   if (result.canceled || result.filePaths.length === 0) return null;
-  
   const filePath = result.filePaths[0];
   const content = fs.readFileSync(filePath, 'utf-8');
   const { pins, robotName } = db.parseAiroPins(content);
-  
   return { filePath, content, pins, robotName };
 }
 
@@ -158,311 +122,155 @@ async function handleOpenAiroFile() {
 
 function setupIpcHandlers() {
   // ---- Robot Operations ----
-  ipcMain.handle('db:createRobot', async (_event, robotData) => {
-    return db.createRobot(robotData);
-  });
-
-  ipcMain.handle('db:getRobot', async (_event, id) => {
-    return db.getRobot(id);
-  });
-
-  ipcMain.handle('db:getRobotByName', async (_event, name) => {
-    return db.getRobotByName(name);
-  });
-
-  ipcMain.handle('db:getAllRobots', async () => {
-    return db.getAllRobots();
-  });
-
-  ipcMain.handle('db:updateRobot', async (_event, id, robotData) => {
-    return db.updateRobot(id, robotData);
-  });
-
-  ipcMain.handle('db:deleteRobot', async (_event, id) => {
-    return db.deleteRobot(id);
-  });
+  ipcMain.handle('db:createRobot', async (_e, d) => db.createRobot(d));
+  ipcMain.handle('db:getRobot', async (_e, id) => db.getRobot(id));
+  ipcMain.handle('db:getRobotByName', async (_e, name) => db.getRobotByName(name));
+  ipcMain.handle('db:getAllRobots', async () => db.getAllRobots());
+  ipcMain.handle('db:updateRobot', async (_e, id, d) => db.updateRobot(id, d));
+  ipcMain.handle('db:deleteRobot', async (_e, id) => db.deleteRobot(id));
 
   // ---- Pin Operations ----
-  ipcMain.handle('db:syncPins', async (_event, robotId, pins) => {
-    return db.syncPins(robotId, pins);
-  });
-
-  ipcMain.handle('db:getPins', async (_event, robotId) => {
-    return db.getPins(robotId);
-  });
-
-  ipcMain.handle('db:updatePinDescription', async (_event, pinId, description) => {
-    return db.updatePinDescription(pinId, description);
-  });
-
-  ipcMain.handle('file:parseAiro', async (_event, filePath) => {
+  ipcMain.handle('db:syncPins', async (_e, robotId, pins) => db.syncPins(robotId, pins));
+  ipcMain.handle('db:getPins', async (_e, robotId) => db.getPins(robotId));
+  ipcMain.handle('db:updatePinDescription', async (_e, pinId, desc) => db.updatePinDescription(pinId, desc));
+  ipcMain.handle('file:parseAiro', async (_e, filePath) => {
     const content = fs.readFileSync(filePath, 'utf-8');
-    const { pins, robotName } = db.parseAiroPins(content);
-    return { content, pins, robotName };
+    return { content, ...db.parseAiroPins(content) };
   });
 
   // ---- Command Log Operations ----
-  ipcMain.handle('db:getCommandLogs', async (_event, robotId, limit) => {
-    return db.getCommandLogs(robotId, limit);
-  });
-
-  ipcMain.handle('db:clearCommandLogs', async (_event, robotId) => {
-    return db.clearCommandLogs(robotId);
-  });
+  ipcMain.handle('db:getCommandLogs', async (_e, robotId, limit) => db.getCommandLogs(robotId, limit));
+  ipcMain.handle('db:clearCommandLogs', async (_e, robotId) => db.clearCommandLogs(robotId));
 
   // ---- AI Config Operations ----
-  ipcMain.handle('db:saveAiConfig', async (_event, robotId, config) => {
-    return db.saveAiConfig(robotId, config);
-  });
-
-  ipcMain.handle('db:getActiveAiConfig', async (_event, robotId) => {
-    return db.getActiveAiConfig(robotId);
-  });
+  ipcMain.handle('db:saveAiConfig', async (_e, robotId, config) => db.saveAiConfig(robotId, config));
+  ipcMain.handle('db:getActiveAiConfig', async (_e, robotId) => db.getActiveAiConfig(robotId));
 
   // ---- Brain Server Operations ----
-  ipcMain.handle('brain:start', async (_event, port, host) => {
-    return brainServer.start(port, host);
-  });
-
-  ipcMain.handle('brain:stop', async () => {
-    return brainServer.stop();
-  });
-
-  ipcMain.handle('brain:status', async () => {
-    return brainServer.getStatus();
-  });
-
-  ipcMain.handle('brain:emergencyStop', async (_event, robotId) => {
-    return brainServer.emergencyStop(robotId);
-  });
-
-  ipcMain.handle('brain:releaseEmergencyStop', async (_event, robotId) => {
-    return brainServer.releaseEmergencyStop(robotId);
-  });
+  ipcMain.handle('brain:start', async (_e, port, host) => brainServer.start(port, host));
+  ipcMain.handle('brain:stop', async () => brainServer.stop());
+  ipcMain.handle('brain:status', async () => brainServer.getStatus());
+  ipcMain.handle('brain:emergencyStop', async (_e, robotId) => brainServer.emergencyStop(robotId));
+  ipcMain.handle('brain:releaseEmergencyStop', async (_e, robotId) => brainServer.releaseEmergencyStop(robotId));
 
   // ---- File Operations ----
-  ipcMain.handle('file:openAiro', async () => {
-    return handleOpenAiroFile();
-  });
+  ipcMain.handle('file:openAiro', async () => handleOpenAiroFile());
 
   // ---- AI Chat Operations ----
   ipcMain.handle('ai:sendChat', async (_event, { robotId, messages, pins, robotData }) => {
     try {
-      // Save user message(s) to chat history
       for (const msg of messages) {
-        if (msg.role === 'user') {
-          db.saveChatMessage(robotId, 'user', msg.content);
-        }
+        if (msg.role === 'user') db.saveChatMessage(robotId, 'user', msg.content);
       }
-
-      // Call NVIDIA API for chat completion
-      const assistantContent = await nvidiaClient.sendChatCompletion({
-        messages,
-        model: robotData?.ai_model
-      });
-
-      // Save assistant message to chat history
+      const assistantContent = await nvidiaClient.sendChatCompletion({ messages, model: robotData?.ai_model });
       db.saveChatMessage(robotId, 'assistant', assistantContent);
-
       return { content: assistantContent, role: 'assistant' };
     } catch (err) {
-      console.error('[Main] AI chat error:', err.message);
       throw new Error(`AI chat failed: ${err.message}`);
     }
   });
 
+  // ---- LNN Model Generation (Legacy - no training) ----
   ipcMain.handle('ai:generateLnnModel', async (_event, { robotId, robotData, pins, messages }) => {
     try {
-      // Call NVIDIA API for LNN model generation
-      const modelConfig = await nvidiaClient.generateLnnModel({
-        robotData,
-        pins,
-        conversationHistory: messages || []
-      });
-
-      // Save the model to database
+      const modelConfig = await nvidiaClient.generateLnnModel({ robotData, pins, conversationHistory: messages || [] });
       const savedModel = db.saveLnnModel(robotId, modelConfig);
-
       return { modelConfig, modelId: savedModel.id };
     } catch (err) {
-      console.error('[Main] LNN generation error:', err.message);
       throw new Error(`LNN model generation failed: ${err.message}`);
     }
   });
 
-  // ---- LNN Model Generation with SSE Streaming ----
+  // ---- LNN Generation + Training + Verification (Full Pipeline) ----
   ipcMain.handle('ai:generateLnnModelStream', async (event, params) => {
     const { robotId, robotData, pins, messages } = params;
 
-    const DEPLOY_API = 'https://airone-deploy.onrender.com';
-
-    // Build the request body
-    const inputPins = (pins || []).filter(p => p.mode === 'input');
-    const outputPins = (pins || []).filter(p => p.mode === 'output');
-
-    const requestBody = {
-      user_id: 'default',
-      robot_name: robotData?.name || 'my-robot',
-      description: robotData?.description || (messages || []).map(m => m.content).join(' '),
-      pin_definitions: {
-        inputs: inputPins.map(p => ({ name: p.pin_name || p.name, pin: p.pin_number || p.number, type: 'analog_input' })),
-        outputs: outputPins.map(p => ({ name: p.pin_name || p.name, pin: p.pin_number || p.number, type: p.mode === 'pwm' ? 'pwm_output' : 'digital_output' }))
-      },
-      sensor_count: inputPins.length,
-      actuator_count: outputPins.length
-    };
-
     try {
-      const response = await fetch(`${DEPLOY_API}/generate/stream`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-      });
-
-      if (!response.ok) {
-        throw new Error(`API returned ${response.status}`);
-      }
-
-      const reader = response.body.getReader();
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let finalResult = null;
-      let currentEvent = '';
-
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop(); // Keep incomplete line in buffer
-
-        for (const line of lines) {
-          if (line.startsWith('event: ')) {
-            currentEvent = line.slice(7).trim();
-            continue;
-          }
-          if (line.startsWith('data: ')) {
-            try {
-              const data = JSON.parse(line.slice(6));
-              // Add event type to data if present
-              if (currentEvent) {
-                data.eventType = currentEvent;
-              }
-
-              // Forward progress to renderer
-              event.sender.send('ai:generateProgress', data);
-
-              // Check for completion
-              if (data.step === 'complete' || data.model_id) {
-                finalResult = data;
-              }
-            } catch (e) {
-              // Ignore parse errors for non-JSON data lines
-            }
-            currentEvent = ''; // Reset event type after processing data
+      // Run the full pipeline: Generate → Train Data → Train → Verify
+      const result = await nvidiaClient.generateAndTrainLnn(
+        { robotData, pins, conversationHistory: messages || [] },
+        (progressData) => {
+          // Forward progress to renderer
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('ai:generateProgress', progressData);
           }
         }
-      }
+      );
 
-      // Process any remaining data in buffer
-      if (buffer.startsWith('data: ')) {
+      // Save the trained model to database
+      if (robotId && result.modelConfig) {
         try {
-          const data = JSON.parse(buffer.slice(6));
-          event.sender.send('ai:generateProgress', data);
-          if (data.step === 'complete' || data.model_id) {
-            finalResult = data;
-          }
+          const savedModel = db.saveLnnModel(robotId, result.modelConfig);
+          result.modelId = savedModel.id;
+
+          // Also register the model with the local brain server
+          brainServer.registerLnnModel(robotData?.name || 'default', result.modelConfig);
         } catch (e) {
-          // Ignore parse errors
+          console.warn('[Main] Failed to save LNN model:', e.message);
         }
       }
 
-      // Save the generated model to database if we have a robotId
-      if (finalResult && robotId && finalResult.config) {
-        try {
-          const savedModel = db.saveLnnModel(robotId, finalResult.config);
-          finalResult.model_id = finalResult.model_id || savedModel.id;
-        } catch (e) {
-          console.warn('[Main] Failed to save streamed LNN model:', e.message);
-        }
-      }
+      return {
+        status: 'generated',
+        model_id: result.modelId || `lnn-${Date.now()}`,
+        config: result.modelConfig,
+        accuracy: result.accuracy,
+        verification: result.verification
+      };
+    } catch (err) {
+      console.error('[Main] LNN generation pipeline error:', err.message);
 
-      return finalResult || { status: 'generated', model_id: 'unknown' };
-    } catch (e) {
-      console.error('[Main] SSE generation error:', e.message);
-
-      // Fallback to non-streaming endpoint
+      // Fallback: try non-streaming generate without training
       try {
-        const fallbackResponse = await fetch(`${DEPLOY_API}/generate`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(requestBody)
+        const modelConfig = await nvidiaClient.generateLnnModel({
+          robotData,
+          pins,
+          conversationHistory: messages || []
         });
 
-        if (!fallbackResponse.ok) {
-          throw new Error(`Fallback API returned ${fallbackResponse.status}`);
+        const savedModel = db.saveLnnModel(robotId, modelConfig);
+
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('ai:generateProgress', {
+            step: 'complete',
+            progress: 100,
+            model_id: savedModel.id,
+            config: modelConfig,
+            accuracy: null
+          });
         }
 
-        const fallbackResult = await fallbackResponse.json();
-
-        // Send progress event for the completed result
-        event.sender.send('ai:generateProgress', {
-          step: 'complete',
-          progress: 100,
-          model_id: fallbackResult.model_id || fallbackResult.id,
-          config: fallbackResult.config,
-          accuracy: fallbackResult.accuracy
-        });
-
-        // Save to database
-        if (robotId && fallbackResult.config) {
-          try {
-            const savedModel = db.saveLnnModel(robotId, fallbackResult.config);
-            fallbackResult.model_id = fallbackResult.model_id || savedModel.id;
-          } catch (e2) {
-            console.warn('[Main] Failed to save fallback LNN model:', e2.message);
-          }
-        }
-
-        return fallbackResult;
+        return {
+          status: 'generated',
+          model_id: savedModel.id,
+          config: modelConfig,
+          accuracy: null
+        };
       } catch (e2) {
-        throw new Error(`Generation failed: ${e2.message}`);
+        throw new Error(`Generation failed: ${err.message}`);
       }
     }
   });
 
-  ipcMain.handle('ai:getChatHistory', async (_event, robotId) => {
-    return db.getChatHistory(robotId);
-  });
+  ipcMain.handle('ai:getChatHistory', async (_e, robotId) => db.getChatHistory(robotId));
+  ipcMain.handle('ai:clearChatHistory', async (_e, robotId) => db.clearChatHistory(robotId));
 
-  ipcMain.handle('ai:clearChatHistory', async (_event, robotId) => {
-    return db.clearChatHistory(robotId);
-  });
-
-  // ---- Deploy Operations ----
+  // ---- Deploy Operations (Multi-Model) ----
   ipcMain.handle('deploy:brainService', async (_event, { robotId, modelConfig }) => {
     try {
-      // Get robot data for the service name
       const robot = db.getRobot(robotId);
-      if (!robot) {
-        throw new Error('Robot not found');
-      }
+      if (!robot) throw new Error('Robot not found');
 
-      // Update model status to 'deploying'
       const latestModel = db.getLatestLnnModel(robotId);
-      if (latestModel) {
-        db.updateLnnModelStatus(latestModel.id, 'deploying');
-      }
+      if (latestModel) db.updateLnnModelStatus(latestModel.id, 'deploying');
 
-      // Deploy to Render
+      // Deploy to the existing brain-template service (multi-model)
       const deployResult = await renderClient.deployBrainService({
         robotId,
         robotName: robot.name,
-        modelConfig
+        modelConfig: modelConfig || (latestModel?.model_config)
       });
 
-      // Update model status and deployment info in database
       if (latestModel) {
         db.updateLnnModelStatus(
           latestModel.id,
@@ -473,92 +281,64 @@ function setupIpcHandlers() {
         );
       }
 
-      // Update robot with brain URL and API key
       db.updateRobot(robotId, {
         brain_url: deployResult.brain_url,
         api_key: deployResult.api_key
       });
 
-      return {
-        brain_url: deployResult.brain_url,
-        api_key: deployResult.api_key,
-        service_id: deployResult.service_id
-      };
+      return deployResult;
     } catch (err) {
-      // Update model status to 'failed' if deploy fails
       const latestModel = db.getLatestLnnModel(robotId);
-      if (latestModel) {
-        db.updateLnnModelStatus(latestModel.id, 'failed');
-      }
-      console.error('[Main] Deploy error:', err.message);
+      if (latestModel) db.updateLnnModelStatus(latestModel.id, 'failed');
       throw new Error(`Brain service deployment failed: ${err.message}`);
     }
   });
 
-  ipcMain.handle('deploy:getStatus', async (_event, serviceId) => {
+  ipcMain.handle('deploy:getStatus', async (_e, serviceId) => {
     try {
       return await renderClient.getServiceStatus(serviceId);
     } catch (err) {
-      console.error('[Main] Get deploy status error:', err.message);
       throw new Error(`Failed to get deploy status: ${err.message}`);
     }
   });
 
-  // ---- LNN Model Operations ----
-  ipcMain.handle('db:getLnnModels', async (_event, robotId) => {
-    return db.getLnnModels(robotId);
+  // ---- Brain Health Check ----
+  ipcMain.handle('deploy:brainHealth', async () => {
+    try {
+      return await renderClient.getBrainHealth();
+    } catch (err) {
+      throw new Error(`Brain health check failed: ${err.message}`);
+    }
   });
 
-  ipcMain.handle('db:getLatestLnnModel', async (_event, robotId) => {
-    return db.getLatestLnnModel(robotId);
+  // ---- LNN Model Operations ----
+  ipcMain.handle('db:getLnnModels', async (_e, robotId) => db.getLnnModels(robotId));
+  ipcMain.handle('db:getLatestLnnModel', async (_e, robotId) => db.getLatestLnnModel(robotId));
+
+  // ---- Register LNN model with local brain server ----
+  ipcMain.handle('brain:registerLnnModel', async (_e, robotName, modelConfig) => {
+    brainServer.registerLnnModel(robotName, modelConfig);
+    return { success: true, models: Array.from(brainServer.lnnModels.keys()) };
   });
 }
 
 // ==================== APP LIFECYCLE ====================
 
 app.whenReady().then(async () => {
-  // Initialize database (async for sql.js)
   await db.initDatabase();
-
-  // Set up IPC handlers
   setupIpcHandlers();
-
-  // Create window
   createWindow();
-
-  // Create menu
   createMenu();
 
-  // Start brain server automatically
   const defaultPort = parseInt(process.env.BRAIN_PORT || '8080', 10);
   brainServer.start(defaultPort, '0.0.0.0');
   console.log(`[Main] Brain server auto-started on port ${defaultPort}`);
 
-  // macOS: recreate window when dock icon clicked
   app.on('activate', () => {
-    if (BrowserWindow.getAllWindows().length === 0) {
-      createWindow();
-    }
+    if (BrowserWindow.getAllWindows().length === 0) createWindow();
   });
 });
 
-// Quit when all windows are closed (except on macOS)
-app.on('window-all-closed', () => {
-  if (process.platform !== 'darwin') {
-    app.quit();
-  }
-});
-
-// Cleanup on quit
-app.on('before-quit', () => {
-  console.log('[Main] Shutting down...');
-  brainServer.stop();
-  db.closeDatabase();
-});
-
-// Security: Prevent new window creation
-app.on('web-contents-created', (_event, contents) => {
-  contents.setWindowOpenHandler(() => {
-    return { action: 'deny' };
-  });
-});
+app.on('window-all-closed', () => { if (process.platform !== 'darwin') app.quit(); });
+app.on('before-quit', () => { brainServer.stop(); db.closeDatabase(); });
+app.on('web-contents-created', (_e, contents) => { contents.setWindowOpenHandler(() => ({ action: 'deny' })); });
