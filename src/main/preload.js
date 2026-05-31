@@ -55,6 +55,17 @@ contextBridge.exposeInMainWorld('aironeAPI', {
   getChatHistory: (robotId) => ipcRenderer.invoke('ai:getChatHistory', robotId),
   clearChatHistory: (robotId) => ipcRenderer.invoke('ai:clearChatHistory', robotId),
 
+  // ==================== LNN MODEL STREAMING ====================
+
+  generateLnnModelStream: (params) => {
+    return new Promise((resolve, reject) => {
+      ipcRenderer.invoke('ai:generateLnnModelStream', params).then(resolve).catch(reject);
+    });
+  },
+  onGenerateProgress: (callback) => {
+    ipcRenderer.on('ai:generateProgress', (_event, data) => callback(data));
+  },
+
   // ==================== DEPLOY OPERATIONS ====================
 
   deployBrainService: (params) => ipcRenderer.invoke('deploy:brainService', params),

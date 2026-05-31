@@ -1,10 +1,26 @@
 /**
  * Airone AI Backbone - AI Chat Component
  * Interactive AI chat interface for designing LNN models for robots.
- * Supports chat with AI, LNN model generation, and cloud deployment.
+ * Supports chat with AI, LNN model generation with SSE streaming progress,
+ * and cloud deployment with step-by-step progress UI.
  */
 
 import React, { useState, useEffect, useRef } from 'react';
+
+const GENERATION_STEPS = [
+  { id: 'generating', name: 'Generating LNN Architecture', icon: '🏗️' },
+  { id: 'creating_data', name: 'Creating Training Data', icon: '📊' },
+  { id: 'training', name: 'Training LNN', icon: '🎯' },
+  { id: 'checking', name: 'Checking for Errors', icon: '🔍' },
+  { id: 'testing', name: 'Testing LNN Behavior', icon: '🧪' },
+  { id: 'finalizing', name: 'Finalizing Model', icon: '✅' }
+];
+
+const DEPLOY_STEPS = [
+  { id: 'deploying', name: 'Deploying to Render...', icon: '🚀' },
+  { id: 'creating_service', name: 'Creating brain service...', icon: '⚙️' },
+  { id: 'deploy_complete', name: 'Brain service live!', icon: '🎉' }
+];
 
 function AiChat() {
   const [messages, setMessages] = useState([]);
@@ -20,20 +36,62 @@ function AiChat() {
   const [pins, setPins] = useState([]);
   const [error, setError] = useState(null);
   const [copyFeedback, setCopyFeedback] = useState({ field: null, timeout: null });
+  const [generateProgress, setGenerateProgress] = useState(null);
+  const [deployProgress, setDeployProgress] = useState(null);
 
   const messagesEndRef = useRef(null);
   const textareaRef = useRef(null);
 
-  // Auto-scroll to bottom on new messages
+  // Auto-scroll to bottom on new messages or progress changes
   useEffect(() => {
     if (messagesEndRef.current) {
       messagesEndRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages]);
+  }, [messages, generateProgress, deployProgress]);
 
   // Load data on mount
   useEffect(() => {
     loadData();
+  }, []);
+
+  // Listen for generation progress events from main process
+  useEffect(() => {
+    if (window.aironeAPI && window.aironeAPI.onGenerateProgress) {
+      window.aironeAPI.onGenerateProgress((progressData) => {
+        setGenerateProgress(progressData);
+
+        // If generation is complete, update status
+        if (progressData.step === 'complete' || progressData.model_id) {
+          setGenerateStatus('ready');
+          if (progressData.config) {
+            setModelConfig(progressData.config);
+          }
+          if (progressData.model_id) {
+            setModelId(progressData.model_id);
+          }
+
+          const accuracyText = progressData.accuracy
+            ? ` Accuracy: ${(progressData.accuracy * 100).toFixed(1)}%`
+            : '';
+          const assistantMessage = {
+            id: Date.now().toString(),
+            role: 'assistant',
+            content: `⚡ LNN Model Generated!${accuracyText}\n\nModel ID: ${progressData.model_id || 'N/A'}\nThe model is ready for deployment.`,
+            timestamp: new Date().toISOString()
+          };
+          setMessages(prev => [...prev, assistantMessage]);
+
+          // Clear progress after a brief delay
+          setTimeout(() => setGenerateProgress(null), 1500);
+        }
+      });
+    }
+
+    return () => {
+      if (window.aironeAPI && window.aironeAPI.removeAllListeners) {
+        window.aironeAPI.removeAllListeners('ai:generateProgress');
+      }
+    };
   }, []);
 
   const loadData = async () => {
@@ -153,14 +211,48 @@ function AiChat() {
     }
   };
 
+  const getStepStatus = (stepId) => {
+    if (!generateProgress) return 'pending';
+    const stepOrder = GENERATION_STEPS.map(s => s.id);
+    const currentIdx = stepOrder.indexOf(generateProgress.step);
+    const thisIdx = stepOrder.indexOf(stepId);
+    if (currentIdx === -1) return 'pending';
+    if (thisIdx < currentIdx) return 'completed';
+    if (thisIdx === currentIdx) return 'active';
+    return 'pending';
+  };
+
+  const getDeployStepStatus = (stepId) => {
+    if (!deployProgress) return 'pending';
+    const stepOrder = DEPLOY_STEPS.map(s => s.id);
+    const currentIdx = stepOrder.indexOf(deployProgress.step);
+    const thisIdx = stepOrder.indexOf(stepId);
+    if (currentIdx === -1) return 'pending';
+    if (thisIdx < currentIdx) return 'completed';
+    if (thisIdx === currentIdx) return 'active';
+    return 'pending';
+  };
+
   const handleGenerate = async () => {
     if (!robotId || pins.length === 0) return;
 
     setGenerateStatus('generating');
+    setGenerateProgress({ step: 'generating', progress: 0 });
     setError(null);
 
     try {
-      if (window.aironeAPI.generateLnnModel) {
+      // Try SSE streaming first
+      if (window.aironeAPI.generateLnnModelStream) {
+        await window.aironeAPI.generateLnnModelStream({
+          robotId,
+          robotData,
+          pins,
+          messages
+        });
+        // Progress updates come via onGenerateProgress callback
+        // Final state is set in the useEffect listener
+      } else if (window.aironeAPI.generateLnnModel) {
+        // Fallback to non-streaming
         const result = await window.aironeAPI.generateLnnModel({
           robotId,
           robotData,
@@ -168,9 +260,10 @@ function AiChat() {
           messages
         });
 
-        setModelConfig(result.config || result);
-        setModelId(result.id);
+        setModelConfig(result.config || result.modelConfig || result);
+        setModelId(result.modelId || result.id);
         setGenerateStatus('ready');
+        setGenerateProgress(null);
 
         const summary = result.summary || `LNN model generated successfully with ${pins.length} pin(s) configured. The model is ready for deployment.`;
         const assistantMessage = {
@@ -182,7 +275,21 @@ function AiChat() {
         setMessages(prev => [...prev, assistantMessage]);
       } else {
         // Simulate generation if API not available
-        await new Promise(resolve => setTimeout(resolve, 2000));
+        setGenerateProgress({ step: 'generating', progress: 10 });
+        await new Promise(resolve => setTimeout(resolve, 800));
+        setGenerateProgress({ step: 'creating_data', progress: 25, message: 'Creating datasets...' });
+        await new Promise(resolve => setTimeout(resolve, 800));
+        setGenerateProgress({ step: 'training', progress: 40, message: 'Training LNN (iteration 1/50)...' });
+        await new Promise(resolve => setTimeout(resolve, 600));
+        setGenerateProgress({ step: 'training', progress: 55, message: 'Training LNN (iteration 25/50)...', accuracy: 0.72 });
+        await new Promise(resolve => setTimeout(resolve, 600));
+        setGenerateProgress({ step: 'training', progress: 70, message: 'Training LNN (iteration 50/50)...', accuracy: 0.91 });
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setGenerateProgress({ step: 'checking', progress: 80, message: 'Validating model...' });
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setGenerateProgress({ step: 'testing', progress: 90, message: 'Running behavior tests...' });
+        await new Promise(resolve => setTimeout(resolve, 500));
+        setGenerateProgress({ step: 'finalizing', progress: 98, message: 'Saving model...' });
 
         const mockConfig = {
           robot_id: robotId,
@@ -200,13 +307,16 @@ function AiChat() {
         const assistantMessage = {
           id: Date.now().toString(),
           role: 'assistant',
-          content: `⚡ LNN Model Generated!\n\nModel configuration created with:\n- ${mockConfig.input_neurons} input neurons\n- ${mockConfig.output_neurons} output neurons\n- ${mockConfig.hidden_layers} hidden layers\n- ${mockConfig.activation} activation function\n\nClick "Deploy to Cloud" to make it available for your robot.`,
+          content: `⚡ LNN Model Generated!\n\nModel configuration created with:\n- ${mockConfig.input_neurons} input neurons\n- ${mockConfig.output_neurons} output neurons\n- ${mockConfig.hidden_layers} hidden layers\n- ${mockConfig.activation} activation function\n- Training accuracy: 91.0%\n\nClick "Deploy to Cloud" to make it available for your robot.`,
           timestamp: new Date().toISOString()
         };
         setMessages(prev => [...prev, assistantMessage]);
+
+        setTimeout(() => setGenerateProgress(null), 1500);
       }
     } catch (e) {
       setGenerateStatus('error');
+      setGenerateProgress(null);
       setError('Model generation failed: ' + e.message);
     }
   };
@@ -215,17 +325,26 @@ function AiChat() {
     if (!robotId || !modelConfig) return;
 
     setDeployStatus('deploying');
+    setDeployProgress({ step: 'deploying', message: 'Connecting to Render...' });
     setError(null);
 
     try {
       if (window.aironeAPI.deployBrainService) {
+        setDeployProgress({ step: 'deploying', message: 'Uploading model to Render...' });
+
         const result = await window.aironeAPI.deployBrainService({
           robotId,
           modelConfig
         });
 
+        setDeployProgress({ step: 'creating_service', message: result.service_id ? 'Updating brain template...' : 'Creating brain service...' });
+
+        // Brief pause to show the creating step
+        await new Promise(resolve => setTimeout(resolve, 800));
+
         setDeployResult(result);
         setDeployStatus('deployed');
+        setDeployProgress({ step: 'deploy_complete', message: 'Brain service is live!' });
 
         // Update robot with brain_url
         if (result.brain_url) {
@@ -236,16 +355,22 @@ function AiChat() {
           }
         }
 
+        const wsUrl = result.brain_url.replace('https://', 'wss://').replace('http://', 'ws://');
         const assistantMessage = {
           id: Date.now().toString(),
           role: 'assistant',
-          content: `🚀 Brain Service Deployed!\n\nYour LNN model is now live in the cloud. Use the Brain URL and API Key shown below to connect your robot.`,
+          content: `🚀 Brain Service Deployed!\n\nYour LNN model is now live in the cloud.\n\nBrain URL: ${result.brain_url}\nWebSocket: ${wsUrl}\n\nUse the URLs shown below to connect your robot.`,
           timestamp: new Date().toISOString()
         };
         setMessages(prev => [...prev, assistantMessage]);
+
+        setTimeout(() => setDeployProgress(null), 2000);
       } else {
         // Simulate deployment if API not available
-        await new Promise(resolve => setTimeout(resolve, 2500));
+        setDeployProgress({ step: 'deploying', message: 'Connecting to Render...' });
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        setDeployProgress({ step: 'creating_service', message: 'Creating brain service...' });
+        await new Promise(resolve => setTimeout(resolve, 1500));
 
         const mockResult = {
           brain_url: `https://brain.airone.dev/service/${robotId}`,
@@ -255,6 +380,7 @@ function AiChat() {
 
         setDeployResult(mockResult);
         setDeployStatus('deployed');
+        setDeployProgress({ step: 'deploy_complete', message: 'Brain service is live!' });
 
         // Update robot with brain_url
         try {
@@ -263,16 +389,20 @@ function AiChat() {
           console.warn('Failed to update robot brain_url:', e);
         }
 
+        const wsUrl = mockResult.brain_url.replace('https://', 'wss://').replace('http://', 'ws://');
         const assistantMessage = {
           id: Date.now().toString(),
           role: 'assistant',
-          content: `🚀 Brain Service Deployed!\n\nYour LNN model is now live. Use the Brain URL and API Key shown below to connect your robot via the Airone IDE.`,
+          content: `🚀 Brain Service Deployed!\n\nYour LNN model is now live.\n\nBrain URL: ${mockResult.brain_url}\nWebSocket: ${wsUrl}\n\nUse the URLs shown below to connect your robot via the Airone IDE.`,
           timestamp: new Date().toISOString()
         };
         setMessages(prev => [...prev, assistantMessage]);
+
+        setTimeout(() => setDeployProgress(null), 2000);
       }
     } catch (e) {
       setDeployStatus('error');
+      setDeployProgress(null);
       setError('Deployment failed: ' + e.message);
     }
   };
@@ -322,8 +452,264 @@ function AiChat() {
     }
   };
 
+  // Compute the progress percentage for the progress bar
+  const getProgressPercent = () => {
+    if (!generateProgress) return 0;
+    if (generateProgress.progress) return generateProgress.progress;
+    const stepOrder = GENERATION_STEPS.map(s => s.id);
+    const idx = stepOrder.indexOf(generateProgress.step);
+    if (idx === -1) return 0;
+    return Math.round(((idx + 1) / stepOrder.length) * 100);
+  };
+
   return (
     <div className="ai-chat fade-in">
+      {/* LNN Progress Panel Styles */}
+      <style>{`
+        @keyframes lnn-spin {
+          from { transform: rotate(0deg); }
+          to { transform: rotate(360deg); }
+        }
+
+        .lnn-progress-panel {
+          background: #1a1f3a;
+          border: 1px solid #2d3561;
+          border-radius: 12px;
+          padding: 16px;
+          margin: 8px 0;
+          color: #e0e0ff;
+          font-size: 13px;
+        }
+
+        .progress-header {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 15px;
+          font-weight: 600;
+          margin-bottom: 14px;
+          color: #fff;
+        }
+
+        .progress-icon {
+          font-size: 18px;
+        }
+
+        .progress-steps {
+          display: flex;
+          flex-direction: column;
+          gap: 2px;
+          margin-bottom: 14px;
+        }
+
+        .progress-step {
+          display: flex;
+          align-items: center;
+          gap: 10px;
+          padding: 7px 10px;
+          border-radius: 6px;
+          border-left: 3px solid transparent;
+          transition: all 0.3s ease;
+        }
+
+        .progress-step.completed {
+          border-left-color: #22c55e;
+          color: #86efac;
+        }
+
+        .progress-step.active {
+          border-left-color: #3b82f6;
+          background: rgba(59, 130, 246, 0.08);
+          color: #fff;
+        }
+
+        .progress-step.pending {
+          border-left-color: #4b5563;
+          color: #6b7280;
+        }
+
+        .step-indicator {
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          width: 22px;
+          height: 22px;
+          font-size: 14px;
+          flex-shrink: 0;
+        }
+
+        .progress-step.active .step-indicator {
+          animation: lnn-spin 1.2s linear infinite;
+          color: #60a5fa;
+          font-size: 16px;
+        }
+
+        .progress-step.completed .step-indicator {
+          color: #22c55e;
+          font-weight: bold;
+        }
+
+        .step-name {
+          flex: 1;
+          font-size: 13px;
+        }
+
+        .step-message {
+          font-size: 11px;
+          color: #93c5fd;
+          margin-left: auto;
+          font-style: italic;
+          max-width: 200px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .progress-bar-container {
+          position: relative;
+          height: 22px;
+          background: #0f1330;
+          border-radius: 11px;
+          overflow: hidden;
+          margin-bottom: 10px;
+        }
+
+        .progress-bar {
+          height: 100%;
+          background: linear-gradient(90deg, #3b82f6, #8b5cf6, #06b6d4);
+          border-radius: 11px;
+          transition: width 0.5s ease;
+          position: relative;
+        }
+
+        .progress-bar::after {
+          content: '';
+          position: absolute;
+          top: 0;
+          left: 0;
+          right: 0;
+          bottom: 0;
+          background: linear-gradient(90deg, transparent, rgba(255,255,255,0.1), transparent);
+          animation: progress-shimmer 2s infinite;
+        }
+
+        @keyframes progress-shimmer {
+          0% { transform: translateX(-100%); }
+          100% { transform: translateX(100%); }
+        }
+
+        .progress-text {
+          position: absolute;
+          top: 50%;
+          left: 50%;
+          transform: translate(-50%, -50%);
+          font-size: 11px;
+          font-weight: 600;
+          color: #fff;
+          text-shadow: 0 1px 2px rgba(0,0,0,0.5);
+        }
+
+        .progress-accuracy {
+          font-size: 12px;
+          color: #34d399;
+          margin-top: 4px;
+          text-align: right;
+        }
+
+        .progress-result {
+          margin-top: 10px;
+          padding: 10px 12px;
+          background: rgba(34, 197, 94, 0.1);
+          border: 1px solid rgba(34, 197, 94, 0.3);
+          border-radius: 8px;
+          font-size: 12px;
+          color: #86efac;
+        }
+
+        .progress-result-id {
+          color: #93c5fd;
+          font-family: monospace;
+        }
+
+        .deploy-progress-panel {
+          background: #1a1f3a;
+          border: 1px solid #2d3561;
+          border-radius: 12px;
+          padding: 16px;
+          margin: 8px 0;
+          color: #e0e0ff;
+          font-size: 13px;
+        }
+
+        .deploy-progress-panel .progress-header {
+          color: #fff;
+        }
+
+        .deploy-progress-panel .progress-step.completed {
+          border-left-color: #22c55e;
+          color: #86efac;
+        }
+
+        .deploy-progress-panel .progress-step.active {
+          border-left-color: #06b6d4;
+          background: rgba(6, 182, 212, 0.08);
+          color: #fff;
+        }
+
+        .deploy-progress-panel .progress-step.active .step-indicator {
+          animation: lnn-spin 1.2s linear infinite;
+          color: #22d3ee;
+        }
+
+        .deploy-result-urls {
+          display: flex;
+          flex-direction: column;
+          gap: 8px;
+          margin-top: 10px;
+        }
+
+        .deploy-url-field {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+        }
+
+        .deploy-url-field label {
+          font-size: 11px;
+          color: #93c5fd;
+          min-width: 90px;
+          font-weight: 600;
+        }
+
+        .deploy-url-field code {
+          flex: 1;
+          font-size: 12px;
+          color: #e0e0ff;
+          background: #0f1330;
+          padding: 6px 10px;
+          border-radius: 6px;
+          overflow: hidden;
+          text-overflow: ellipsis;
+          white-space: nowrap;
+        }
+
+        .deploy-url-field .copy-btn {
+          padding: 4px 10px;
+          font-size: 11px;
+          background: #2d3561;
+          color: #e0e0ff;
+          border: 1px solid #3d4575;
+          border-radius: 6px;
+          cursor: pointer;
+          transition: all 0.2s;
+          white-space: nowrap;
+        }
+
+        .deploy-url-field .copy-btn:hover {
+          background: #3d4575;
+        }
+      `}</style>
+
       {/* Page Header */}
       <div className="page-header">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" width="28" height="28">
@@ -387,6 +773,81 @@ function AiChat() {
             <div className="chat-message-time">{formatTimestamp(msg.timestamp)}</div>
           </div>
         ))}
+
+        {/* LNN Generation Progress Panel */}
+        {generateProgress && generateStatus === 'generating' && (
+          <div className="chat-message assistant">
+            <div className="chat-message-role">AI</div>
+            <div className="chat-message-content" style={{ padding: 0, background: 'transparent', border: 'none' }}>
+              <div className="lnn-progress-panel">
+                <div className="progress-header">
+                  <span className="progress-icon">🧠</span>
+                  <span>Generating LNN for {robotData?.name || 'Robot'}</span>
+                </div>
+                <div className="progress-steps">
+                  {GENERATION_STEPS.map((step) => (
+                    <div key={step.id} className={`progress-step ${getStepStatus(step.id)}`}>
+                      <span className="step-indicator">
+                        {getStepStatus(step.id) === 'completed' ? '✓' :
+                         getStepStatus(step.id) === 'active' ? '⟳' : '○'}
+                      </span>
+                      <span className="step-name">{step.icon} {step.name}</span>
+                      {generateProgress.step === step.id && generateProgress.message && (
+                        <span className="step-message">{generateProgress.message}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+                <div className="progress-bar-container">
+                  <div className="progress-bar" style={{ width: `${getProgressPercent()}%` }} />
+                  <span className="progress-text">{getProgressPercent()}%</span>
+                </div>
+                {generateProgress.accuracy !== undefined && (
+                  <div className="progress-accuracy">
+                    Training accuracy: {(generateProgress.accuracy * 100).toFixed(1)}%
+                  </div>
+                )}
+                {generateProgress.model_id && (
+                  <div className="progress-result">
+                    ✓ Model generated! ID: <span className="progress-result-id">{generateProgress.model_id}</span>
+                    {generateProgress.accuracy !== undefined && (
+                      <> — Accuracy: {(generateProgress.accuracy * 100).toFixed(1)}%</>
+                    )}
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
+        )}
+
+        {/* Deploy Progress Panel */}
+        {deployProgress && deployStatus === 'deploying' && (
+          <div className="chat-message assistant">
+            <div className="chat-message-role">AI</div>
+            <div className="chat-message-content" style={{ padding: 0, background: 'transparent', border: 'none' }}>
+              <div className="deploy-progress-panel">
+                <div className="progress-header">
+                  <span className="progress-icon">🚀</span>
+                  <span>Deploying Brain Service</span>
+                </div>
+                <div className="progress-steps">
+                  {DEPLOY_STEPS.map((step) => (
+                    <div key={step.id} className={`progress-step ${getDeployStepStatus(step.id)}`}>
+                      <span className="step-indicator">
+                        {getDeployStepStatus(step.id) === 'completed' ? '✓' :
+                         getDeployStepStatus(step.id) === 'active' ? '⟳' : '○'}
+                      </span>
+                      <span className="step-name">{step.icon} {step.name}</span>
+                      {deployProgress.step === step.id && deployProgress.message && (
+                        <span className="step-message">{deployProgress.message}</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            </div>
+          </div>
+        )}
 
         {/* Sending indicator */}
         {isSending && (
@@ -456,6 +917,20 @@ function AiChat() {
                 onClick={() => handleCopy(deployResult.brain_url, 'brain_url')}
               >
                 {copyFeedback.field === 'brain_url' ? '✓' : 'Copy'}
+              </button>
+            </div>
+          </div>
+          <div className="deploy-field">
+            <label>WebSocket URL</label>
+            <div className="deploy-url-row">
+              <code className="deploy-url">
+                {deployResult.brain_url.replace('https://', 'wss://').replace('http://', 'ws://')}
+              </code>
+              <button
+                className="copy-btn"
+                onClick={() => handleCopy(deployResult.brain_url.replace('https://', 'wss://').replace('http://', 'ws://'), 'ws_url')}
+              >
+                {copyFeedback.field === 'ws_url' ? '✓' : 'Copy'}
               </button>
             </div>
           </div>

@@ -290,6 +290,148 @@ function setupIpcHandlers() {
     }
   });
 
+  // ---- LNN Model Generation with SSE Streaming ----
+  ipcMain.handle('ai:generateLnnModelStream', async (event, params) => {
+    const { robotId, robotData, pins, messages } = params;
+
+    const DEPLOY_API = 'https://airone-deploy.onrender.com';
+
+    // Build the request body
+    const inputPins = (pins || []).filter(p => p.mode === 'input');
+    const outputPins = (pins || []).filter(p => p.mode === 'output');
+
+    const requestBody = {
+      user_id: 'default',
+      robot_name: robotData?.name || 'my-robot',
+      description: robotData?.description || (messages || []).map(m => m.content).join(' '),
+      pin_definitions: {
+        inputs: inputPins.map(p => ({ name: p.pin_name || p.name, pin: p.pin_number || p.number, type: 'analog_input' })),
+        outputs: outputPins.map(p => ({ name: p.pin_name || p.name, pin: p.pin_number || p.number, type: p.mode === 'pwm' ? 'pwm_output' : 'digital_output' }))
+      },
+      sensor_count: inputPins.length,
+      actuator_count: outputPins.length
+    };
+
+    try {
+      const response = await fetch(`${DEPLOY_API}/generate/stream`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+      });
+
+      if (!response.ok) {
+        throw new Error(`API returned ${response.status}`);
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let finalResult = null;
+      let currentEvent = '';
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n');
+        buffer = lines.pop(); // Keep incomplete line in buffer
+
+        for (const line of lines) {
+          if (line.startsWith('event: ')) {
+            currentEvent = line.slice(7).trim();
+            continue;
+          }
+          if (line.startsWith('data: ')) {
+            try {
+              const data = JSON.parse(line.slice(6));
+              // Add event type to data if present
+              if (currentEvent) {
+                data.eventType = currentEvent;
+              }
+
+              // Forward progress to renderer
+              event.sender.send('ai:generateProgress', data);
+
+              // Check for completion
+              if (data.step === 'complete' || data.model_id) {
+                finalResult = data;
+              }
+            } catch (e) {
+              // Ignore parse errors for non-JSON data lines
+            }
+            currentEvent = ''; // Reset event type after processing data
+          }
+        }
+      }
+
+      // Process any remaining data in buffer
+      if (buffer.startsWith('data: ')) {
+        try {
+          const data = JSON.parse(buffer.slice(6));
+          event.sender.send('ai:generateProgress', data);
+          if (data.step === 'complete' || data.model_id) {
+            finalResult = data;
+          }
+        } catch (e) {
+          // Ignore parse errors
+        }
+      }
+
+      // Save the generated model to database if we have a robotId
+      if (finalResult && robotId && finalResult.config) {
+        try {
+          const savedModel = db.saveLnnModel(robotId, finalResult.config);
+          finalResult.model_id = finalResult.model_id || savedModel.id;
+        } catch (e) {
+          console.warn('[Main] Failed to save streamed LNN model:', e.message);
+        }
+      }
+
+      return finalResult || { status: 'generated', model_id: 'unknown' };
+    } catch (e) {
+      console.error('[Main] SSE generation error:', e.message);
+
+      // Fallback to non-streaming endpoint
+      try {
+        const fallbackResponse = await fetch(`${DEPLOY_API}/generate`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(requestBody)
+        });
+
+        if (!fallbackResponse.ok) {
+          throw new Error(`Fallback API returned ${fallbackResponse.status}`);
+        }
+
+        const fallbackResult = await fallbackResponse.json();
+
+        // Send progress event for the completed result
+        event.sender.send('ai:generateProgress', {
+          step: 'complete',
+          progress: 100,
+          model_id: fallbackResult.model_id || fallbackResult.id,
+          config: fallbackResult.config,
+          accuracy: fallbackResult.accuracy
+        });
+
+        // Save to database
+        if (robotId && fallbackResult.config) {
+          try {
+            const savedModel = db.saveLnnModel(robotId, fallbackResult.config);
+            fallbackResult.model_id = fallbackResult.model_id || savedModel.id;
+          } catch (e2) {
+            console.warn('[Main] Failed to save fallback LNN model:', e2.message);
+          }
+        }
+
+        return fallbackResult;
+      } catch (e2) {
+        throw new Error(`Generation failed: ${e2.message}`);
+      }
+    }
+  });
+
   ipcMain.handle('ai:getChatHistory', async (_event, robotId) => {
     return db.getChatHistory(robotId);
   });
