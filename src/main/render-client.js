@@ -17,7 +17,7 @@ const RENDER_API_BASE = 'https://api.render.com/v1';
 const RENDER_API_KEY = 'rnd_4g4q8NK7SoDjx6MT4Q53aFYJwBON';
 
 // The single brain-template service that hosts all robot models
-const BRAIN_SERVICE_ID = 'srv-cvg4sgm1ohc55g3h0cv0';
+const BRAIN_SERVICE_ID = 'srv-d8dh9esm0tmc73duts10';
 const BRAIN_SERVICE_NAME = 'airone-brain-template';
 
 const POLL_INTERVAL_MS = 10000;  // 10 seconds
