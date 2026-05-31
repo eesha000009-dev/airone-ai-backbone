@@ -10,7 +10,7 @@ const { v4: uuidv4 } = require('uuid');
 const RENDER_API_BASE = 'https://api.render.com/v1';
 const RENDER_API_KEY = 'rnd_4g4q8NK7SoDjx6MT4Q53aFYJwBON';
 const BRAIN_SERVER_REPO = 'https://github.com/eesha000009-dev/airone-ide';
-const BRAIN_SERVER_BRANCH = 'master';
+const BRAIN_SERVER_BRANCH = 'main';
 const BRAIN_SERVER_ROOT_DIR = 'render-brain-server';
 const POLL_INTERVAL_MS = 10000;  // 10 seconds
 const POLL_TIMEOUT_MS = 180000;  // 3 minutes
@@ -48,10 +48,19 @@ async function deployBrainService({ robotId, robotName, modelConfig }) {
     repo: BRAIN_SERVER_REPO,
     branch: BRAIN_SERVER_BRANCH,
     rootDir: BRAIN_SERVER_ROOT_DIR,
-    buildCommand: 'pip install -r requirements.txt',
-    startCommand: 'python brain_server.py',
+    serviceDetails: {
+      env: 'python',
+      buildCommand: 'pip install -r requirements.txt',
+      startCommand: 'python brain_server.py',
+      plan: 'free',
+      region: 'oregon',
+      envSpecificDetails: {
+        buildCommand: 'pip install -r requirements.txt',
+        startCommand: 'python brain_server.py'
+      }
+    },
     envVars: envVars,
-    plan: 'starter'
+    plan: 'free'
   };
 
   const headers = {
@@ -89,26 +98,30 @@ async function deployBrainService({ robotId, robotName, modelConfig }) {
     let serviceId;
 
     if (existingServiceId) {
-      // Update the existing service
+      // Update the existing service - trigger a deploy with env vars
       console.log(`[RenderClient] Updating existing service: ${serviceName} (${existingServiceId})`);
-      try {
-        await axios.patch(`${RENDER_API_BASE}/services/${existingServiceId}`, {
-          envVars: envVars
-        }, { headers, timeout: 15000 });
-      } catch (patchErr) {
-        console.warn('[RenderClient] Could not update service env vars:', patchErr.message);
-      }
 
-      // Trigger a manual deploy
+      // Trigger a manual deploy with updated env vars
       try {
         const deployResponse = await axios.post(
           `${RENDER_API_BASE}/services/${existingServiceId}/deploys`,
-          {},
+          { envVars: envVars },
           { headers, timeout: 15000 }
         );
-        console.log('[RenderClient] Triggered manual deploy for existing service');
+        console.log('[RenderClient] Triggered deploy with env vars for existing service');
       } catch (deployErr) {
-        console.warn('[RenderClient] Could not trigger manual deploy:', deployErr.message);
+        console.warn('[RenderClient] Could not trigger deploy with env vars:', deployErr.message);
+        // Fallback: try without env vars
+        try {
+          await axios.post(
+            `${RENDER_API_BASE}/services/${existingServiceId}/deploys`,
+            {},
+            { headers, timeout: 15000 }
+          );
+          console.log('[RenderClient] Triggered manual deploy for existing service');
+        } catch (deployErr2) {
+          console.warn('[RenderClient] Could not trigger manual deploy:', deployErr2.message);
+        }
       }
 
       serviceId = existingServiceId;
@@ -134,7 +147,10 @@ async function deployBrainService({ robotId, robotName, modelConfig }) {
     const service = await pollUntilLive(serviceId, headers);
 
     // Build the brain WebSocket URL
-    const hostname = service.suspenders?.[0]?.hostname || service.hostname;
+    const serviceDetails = service.serviceDetails || {};
+    const hostname = serviceDetails.url
+      ? serviceDetails.url.replace('https://', '').replace('http://', '')
+      : (service.suspenders?.[0]?.hostname || service.hostname || '');
     const brainUrl = hostname ? `wss://${hostname}` : '';
 
     console.log(`[RenderClient] Service deployed! Brain URL: ${brainUrl}`);

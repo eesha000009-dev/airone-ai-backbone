@@ -10,6 +10,7 @@ const axios = require('axios');
 const NVIDIA_API_URL = 'https://integrate.api.nvidia.com/v1/chat/completions';
 const NVIDIA_API_KEY = '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';
 const DEFAULT_MODEL = 'moonshotai/kimi-k2.6';
+const FALLBACK_MODEL = 'meta/llama-3.1-8b-instruct';  // Faster model for LNN generation
 
 // z-ai SDK for fallback
 let zaiInstance = null;
@@ -52,7 +53,7 @@ async function sendChatCompletion({ messages, model }) {
         'Authorization': `Bearer ${NVIDIA_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      timeout: 60000
+      timeout: 90000  // Kimi K2.6 can be slow
     });
 
     const content = response.data?.choices?.[0]?.message?.content;
@@ -165,7 +166,7 @@ Generate the LNN model JSON now.`;
 
   let content = null;
 
-  // Try NVIDIA API first
+  // Try NVIDIA API first with Kimi K2.6
   try {
     const response = await axios.post(NVIDIA_API_URL, {
       model: DEFAULT_MODEL,
@@ -180,12 +181,35 @@ Generate the LNN model JSON now.`;
         'Authorization': `Bearer ${NVIDIA_API_KEY}`,
         'Content-Type': 'application/json'
       },
-      timeout: 60000
+      timeout: 90000  // Kimi can be slow
     });
 
     content = response.data?.choices?.[0]?.message?.content;
   } catch (nvidiaErr) {
-    console.warn('[NvidiaClient] NVIDIA API failed for LNN generation, trying z-ai fallback:', nvidiaErr.message);
+    console.warn('[NvidiaClient] Kimi K2.6 failed for LNN generation, trying faster fallback model:', nvidiaErr.message);
+    
+    // Try with the faster fallback model
+    try {
+      const fallbackResponse = await axios.post(NVIDIA_API_URL, {
+        model: FALLBACK_MODEL,
+        messages: [
+          { role: 'system', content: LNN_SYSTEM_PROMPT },
+          { role: 'user', content: userMessage }
+        ],
+        temperature: 0.3,
+        max_tokens: 1024
+      }, {
+        headers: {
+          'Authorization': `Bearer ${NVIDIA_API_KEY}`,
+          'Content-Type': 'application/json'
+        },
+        timeout: 30000
+      });
+      content = fallbackResponse.data?.choices?.[0]?.message?.content;
+      console.log('[NvidiaClient] Successfully used fallback model for LNN generation');
+    } catch (fallbackModelErr) {
+      console.warn('[NvidiaClient] Fallback model also failed:', fallbackModelErr.message);
+    }
     
     // Fallback to z-ai-web-dev-sdk
     try {
