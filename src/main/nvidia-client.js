@@ -37,6 +37,83 @@ function resolveModelId(modelId) {
   return MODEL_ID_MAP[modelId] || DEFAULT_MODEL;
 }
 
+
+/**
+ * Robustly extract and parse JSON from AI response text.
+ * Handles: markdown code fences, trailing commas, extra text before/after JSON,
+ * comments, and partial responses.
+ * @param {string} content - Raw AI response text
+ * @returns {Object|null} - Parsed JSON object or null
+ */
+function extractJsonFromAiResponse(content) {
+  if (!content || typeof content !== 'string') return null;
+
+  // Step 1: Try direct parse
+  try {
+    return JSON.parse(content);
+  } catch (_e) { /* continue */ }
+
+  // Step 2: Extract from markdown code fences
+  const codeFenceMatch = content.match(/```(?:json)?\s*\n?([\s\S]*?)\n?\s*```/);
+  if (codeFenceMatch) {
+    try {
+      return JSON.parse(codeFenceMatch[1].trim());
+    } catch (_e) { /* continue */ }
+    try {
+      let fixed = codeFenceMatch[1].trim();
+      fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+      fixed = fixed.replace(/\/\/.*$/gm, '');
+      return JSON.parse(fixed);
+    } catch (_e) { /* continue */ }
+  }
+
+  // Step 3: Find outermost JSON object with balanced brace counting
+  let firstBrace = -1;
+  let braceCount = 0;
+  let lastValidEnd = -1;
+  for (let i = 0; i < content.length; i++) {
+    if (content[i] === '{') {
+      if (braceCount === 0) firstBrace = i;
+      braceCount++;
+    } else if (content[i] === '}') {
+      braceCount--;
+      if (braceCount === 0 && firstBrace >= 0) {
+        lastValidEnd = i;
+      }
+    }
+  }
+
+  if (firstBrace >= 0 && lastValidEnd > firstBrace) {
+    const jsonStr = content.substring(firstBrace, lastValidEnd + 1);
+    try {
+      return JSON.parse(jsonStr);
+    } catch (_e) { /* continue */ }
+    try {
+      let fixed = jsonStr;
+      fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+      fixed = fixed.replace(/\/\/.*$/gm, '');
+      fixed = fixed.replace(/'/g, '"');
+      return JSON.parse(fixed);
+    } catch (_e) { /* continue */ }
+  }
+
+  // Step 4: Fallback regex match
+  const jsonMatch = content.match(/\{[\s\S]*\}/);
+  if (jsonMatch) {
+    try {
+      return JSON.parse(jsonMatch[0]);
+    } catch (_e) { /* continue */ }
+    try {
+      let fixed = jsonMatch[0];
+      fixed = fixed.replace(/,\s*([}\]])/g, '$1');
+      fixed = fixed.replace(/\/\/.*$/gm, '');
+      return JSON.parse(fixed);
+    } catch (_e) { /* continue */ }
+  }
+
+  return null;
+}
+
 // z-ai SDK for fallback
 let zaiInstance = null;
 async function getZaiInstance() {
@@ -331,23 +408,7 @@ Generate the LNN model JSON now.`;
   let modelConfig = null;
 
   if (content) {
-    // Try to parse as JSON directly
-    try {
-      modelConfig = JSON.parse(content);
-    } catch (_parseErr) {
-      // Not valid JSON — try extracting JSON via regex
-    }
-
-    if (!modelConfig) {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          modelConfig = JSON.parse(jsonMatch[0]);
-        } catch (_err) {
-          // Still couldn't parse
-        }
-      }
-    }
+    modelConfig = extractJsonFromAiResponse(content);
   }
 
   // Build default config if AI failed
@@ -483,18 +544,7 @@ Output ONLY the JSON object.`;
   let trainingData = null;
 
   if (content) {
-    try {
-      trainingData = JSON.parse(content);
-    } catch (_e) {
-      const jsonMatch = content.match(/\{[\s\S]*\}/);
-      if (jsonMatch) {
-        try {
-          trainingData = JSON.parse(jsonMatch[0]);
-        } catch (_e2) {
-          // Couldn't parse
-        }
-      }
-    }
+    trainingData = extractJsonFromAiResponse(content);
   }
 
   // If AI failed, generate training data from behavior rules
@@ -603,18 +653,7 @@ Output ONLY the JSON object.`;
   }
 
   let parsed = null;
-  try {
-    parsed = JSON.parse(content);
-  } catch (_e) {
-    const jsonMatch = content.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      try {
-        parsed = JSON.parse(jsonMatch[0]);
-      } catch (_e2) {
-        // Couldn't parse
-      }
-    }
-  }
+  parsed = extractJsonFromAiResponse(content);
 
   if (!parsed || !parsed.training_data || !Array.isArray(parsed.training_data)) {
     console.warn(`[NvidiaClient] Could not parse training data from batch "${scenarioType}"`);
