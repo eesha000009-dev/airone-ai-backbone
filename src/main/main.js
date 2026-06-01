@@ -17,6 +17,7 @@ const nvidiaClient = require('./nvidia-client');
 const renderClient = require('./render-client');
 
 let mainWindow = null;
+let lastSyncedData = null;
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -66,6 +67,69 @@ function createWindow() {
           mainWindow.webContents.send('brain:event', event);
           break;
       }
+    }
+  });
+}
+
+// ---- HTTP API Server for IDE sync ----
+const http = require('http');
+const SYNC_PORT = 8080;
+
+function startSyncServer() {
+  const server = http.createServer(async (req, res) => {
+    // CORS headers
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+    res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+
+    if (req.method === 'OPTIONS') {
+      res.writeHead(204);
+      res.end();
+      return;
+    }
+
+    if (req.method === 'POST' && req.url === '/api/pins/sync') {
+      let body = '';
+      req.on('data', chunk => { body += chunk.toString(); });
+      req.on('end', () => {
+        try {
+          const data = JSON.parse(body);
+          console.log('[SyncServer] Received pin sync:', data.robotName, 
+            data.pinDefinitions?.inputs?.length || 0, 'inputs,', 
+            data.pinDefinitions?.outputs?.length || 0, 'outputs');
+
+          // Store synced data for the frontend to pick up
+          lastSyncedData = data;
+
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('pins:synced', data);
+          }
+
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, message: 'Pins synced successfully' }));
+        } catch (err) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, message: err.message }));
+        }
+      });
+    } else if (req.method === 'GET' && req.url === '/api/health') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ status: 'ok', service: 'airone-ai-backbone' }));
+    } else {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
+    }
+  });
+
+  server.listen(SYNC_PORT, () => {
+    console.log(`[SyncServer] Listening on port ${SYNC_PORT} for IDE sync`);
+  });
+
+  server.on('error', (err) => {
+    if (err.code === 'EADDRINUSE') {
+      console.warn(`[SyncServer] Port ${SYNC_PORT} already in use, skipping sync server`);
+    } else {
+      console.error('[SyncServer] Error:', err.message);
     }
   });
 }
@@ -133,6 +197,7 @@ function setupIpcHandlers() {
   ipcMain.handle('db:syncPins', async (_e, robotId, pins) => db.syncPins(robotId, pins));
   ipcMain.handle('db:getPins', async (_e, robotId) => db.getPins(robotId));
   ipcMain.handle('db:updatePinDescription', async (_e, pinId, desc) => db.updatePinDescription(pinId, desc));
+  ipcMain.handle('pins:getSynced', async () => lastSyncedData);
   ipcMain.handle('file:parseAiro', async (_e, filePath) => {
     const content = fs.readFileSync(filePath, 'utf-8');
     return { content, ...db.parseAiroPins(content) };
@@ -353,6 +418,7 @@ app.whenReady().then(async () => {
   setupIpcHandlers();
   createWindow();
   createMenu();
+  startSyncServer();
 
   const defaultPort = parseInt(process.env.BRAIN_PORT || '8080', 10);
   brainServer.start(defaultPort, '0.0.0.0');

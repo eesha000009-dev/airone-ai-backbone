@@ -20,6 +20,23 @@ const TRAINING_MODEL = 'meta/llama-3.1-8b-instruct';   // Use Llama for training
 const DEFAULT_MODEL = 'meta/llama-3.1-8b-instruct';    // Default to fast model
 const FALLBACK_MODEL = 'meta/llama-3.1-8b-instruct';
 
+// Map UI model IDs to NVIDIA API model IDs
+const MODEL_ID_MAP = {
+  'kimi-k2.6': ARCHITECTURE_MODEL,  // 'moonshotai/kimi-k2.6'
+  'gpt4': 'openai/gpt-4',
+  'claude': 'anthropic/claude-3-sonnet',
+  'llama3': TRAINING_MODEL,  // 'meta/llama-3.1-8b-instruct'
+  'rule-based': null,
+};
+
+function resolveModelId(modelId) {
+  if (!modelId) return DEFAULT_MODEL;
+  // Check if it's already a full NVIDIA API model ID (contains '/')
+  if (modelId.includes('/')) return modelId;
+  // Map from UI ID to API ID
+  return MODEL_ID_MAP[modelId] || DEFAULT_MODEL;
+}
+
 // z-ai SDK for fallback
 let zaiInstance = null;
 async function getZaiInstance() {
@@ -40,7 +57,7 @@ const CHAT_SYSTEM_PROMPT = `You are an AI assistant specialized in designing rob
  * Send chat messages to the NVIDIA API and get a completion.
  */
 async function sendChatCompletion({ messages, model }) {
-  const modelToUse = model || DEFAULT_MODEL;
+  const modelToUse = resolveModelId(model);
 
   try {
     const response = await axios.post(NVIDIA_API_URL, {
@@ -258,21 +275,21 @@ Generate the LNN model JSON now.`;
 
   let content = null;
 
-  // Try NVIDIA API with the FAST model first (Llama 3.1: 0.3s vs Kimi's 60-120s)
+  // Try NVIDIA API with Kimi K2.6 first (higher quality architecture)
   try {
-    console.log('[NvidiaClient] Generating LNN architecture with fast model (Llama 3.1)...');
+    console.log('[NvidiaClient] Generating LNN architecture with Kimi K2.6 (streaming)...');
     content = await callNvidiaStreaming([
       { role: 'system', content: LNN_SYSTEM_PROMPT },
       { role: 'user', content: userMessage }
-    ], { model: TRAINING_MODEL, temperature: 0.3, maxTokens: 2048 });
+    ], { model: ARCHITECTURE_MODEL, temperature: 0.3, maxTokens: 2048 });
   } catch (nvidiaErr) {
     console.warn('[NvidiaClient] Fast model failed for LNN generation:', nvidiaErr.message);
 
-    // Try with Kimi K2.6 as quality fallback
+    // Try with Llama 3.1 as speed fallback
     try {
-      console.log('[NvidiaClient] Trying Kimi K2.6 as quality fallback...');
+      console.log('[NvidiaClient] Trying Llama 3.1 as speed fallback...');
       const fallbackResponse = await axios.post(NVIDIA_API_URL, {
-        model: ARCHITECTURE_MODEL,
+        model: TRAINING_MODEL,
         messages: [
           { role: 'system', content: LNN_SYSTEM_PROMPT },
           { role: 'user', content: userMessage }
@@ -548,11 +565,11 @@ Output ONLY the JSON object.`;
   let content = null;
 
   try {
-    console.log(`[NvidiaClient] Generating batch "${scenarioType}" with ${TRAINING_MODEL} (fast model)...`);
+    console.log(`[NvidiaClient] Generating batch "${scenarioType}" with ${ARCHITECTURE_MODEL} (Kimi K2.6)...`);
     content = await callNvidiaStreaming([
       { role: 'system', content: BATCH_PROMPT },
       { role: 'user', content: `Generate ${batchSize} training examples for the ${scenarioType} scenario now.` }
-    ], { model: TRAINING_MODEL, temperature: 0.6, maxTokens: 8192 });
+    ], { model: ARCHITECTURE_MODEL, temperature: 0.6, maxTokens: 8192 });
   } catch (err) {
     console.warn(`[NvidiaClient] Batch "${scenarioType}" failed with ${TRAINING_MODEL}: ${err.message}`);
 
@@ -624,7 +641,7 @@ function augmentTrainingData(trainingData) {
 
   // Phase 1: Create 3 noise variants for each example
   for (const example of trainingData) {
-    for (let variant = 0; variant < 3; variant++) {
+    for (let variant = 0; variant < 5; variant++) {
       const noisyInputs = {};
       const noisyOutputs = {};
 
@@ -682,6 +699,28 @@ function augmentTrainingData(trainingData) {
     augmented.push({ inputs: interpInputs, expected_outputs: interpOutputs });
   }
 
+  // Phase 3: Multi-level noise augmentation (±2%, ±10%, ±15%)
+  const noiseLevels = [0.02, 0.10, 0.15];
+  for (const level of noiseLevels) {
+    for (const example of trainingData) {
+      const noisyInputs = {};
+      const noisyOutputs = {};
+      if (example.inputs) {
+        for (const [key, val] of Object.entries(example.inputs)) {
+          const numVal = typeof val === 'number' ? val : parseFloat(val) || 0;
+          const noise = (Math.random() * 2 - 1) * level;
+          noisyInputs[key] = Math.max(0, Math.min(1, numVal + noise));
+        }
+      }
+      if (example.expected_outputs) {
+        for (const [key, val] of Object.entries(example.expected_outputs)) {
+          noisyOutputs[key] = typeof val === 'number' ? val : parseFloat(val) || 0;
+        }
+      }
+      augmented.push({ inputs: noisyInputs, expected_outputs: noisyOutputs });
+    }
+  }
+
   return augmented;
 }
 
@@ -716,52 +755,102 @@ async function generateMassiveTrainingData({ robotData, pins, modelConfig, conve
     {
       type: 'Emergency Scenarios',
       description: 'Obstacle VERY close (5-20cm) from each direction: front, left, right, behind. Robot must STOP, REVERSE, or TURN HARD immediately. Motor outputs near 0 or sharp differential. Critical safety scenarios.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Normal Navigation',
       description: 'Clear paths with obstacles at safe distances (>100cm). Robot cruises forward at moderate to high speed. All distance sensors show far readings. Smooth, predictable motor outputs.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Edge Cases',
       description: 'Obstacles on multiple sides simultaneously. Robot must choose best escape direction. Ambiguous situations where left AND right are blocked, or front AND one side are blocked.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Gradual Approach',
       description: 'Medium distances (40-100cm). Robot should slow down gradually as it approaches obstacles. Smooth deceleration curves. Motor speed proportional to nearest obstacle distance.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Sharp Turns and Pivots',
       description: 'Scenarios requiring sharp directional changes. One side suddenly blocked, robot must pivot 90+ degrees. Differential motor control: one motor full forward, other stopped or reversed.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Recovery Scenarios',
       description: 'Robot is stuck or trapped. All directions blocked at close range. Robot should attempt small random movements, reverse, or wait. Getting unstuck behaviors.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Speed Variations',
       description: 'Same obstacle configuration at different approach speeds. How robot responds when it has more or less time to react. Varying motor power levels from 10% to 100%.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Sensor Noise and Tolerance',
       description: 'Slightly inconsistent sensor readings. Same scenario but with ±5-10% variation in sensor values. Robot should produce consistent outputs despite noisy inputs. Tolerance to sensor jitter.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Complex Multi-Obstacle',
       description: 'Multiple obstacles at different distances simultaneously. 3+ obstacles detected at varying ranges. Robot must navigate through gaps, prioritize nearest threat, plan path through clutter.',
-      batchSize: 50
+      batchSize: 100
     },
     {
       type: 'Idle and Low-Power States',
       description: 'Robot is idle, no obstacles detected, no motion. Low-power standby mode. Minimal motor activity. Startup from idle when obstacle appears. Transition from active to idle.',
-      batchSize: 50
+      batchSize: 100
+    },
+    {
+      type: 'Corridor Navigation',
+      description: 'Robot navigating narrow corridors with walls on both sides at medium distance. Must maintain center path. Equal sensor readings on left and right walls.',
+      batchSize: 100
+    },
+    {
+      type: 'Dynamic Obstacles',
+      description: 'Obstacles appearing suddenly at varying speeds. Robot must react quickly. Scenarios with rapid sensor changes from far to close readings.',
+      batchSize: 100
+    },
+    {
+      type: 'Low Battery Behavior',
+      description: 'Robot with reduced motor power. Slower responses, more conservative obstacle avoidance. Prioritizes safety over speed.',
+      batchSize: 100
+    },
+    {
+      type: 'Sensor Failure Recovery',
+      description: 'One or more sensors returning max values or zero. Robot must rely on remaining sensors. Graceful degradation of navigation.',
+      batchSize: 100
+    },
+    {
+      type: 'Wall Following',
+      description: 'Robot following a wall at consistent distance. Maintains specific distance from wall on one side while navigating forward. Precise distance control.',
+      batchSize: 100
+    },
+    {
+      type: 'Corner Detection and Turning',
+      description: 'Robot detects corners where wall ends or begins. Must turn appropriately at T-intersections, L-turns, and dead ends. Decision-making at junctions.',
+      batchSize: 100
+    },
+    {
+      type: 'Speed Ramping',
+      description: 'Gradual acceleration from standstill and deceleration to stop. Smooth motor transitions. No sudden jumps in motor output.',
+      batchSize: 100
+    },
+    {
+      type: 'Obstacle Avoidance with Multiple Outputs',
+      description: 'Complex scenarios using motors, servos, and digital outputs simultaneously. Coordinated multi-actuator responses to sensor inputs.',
+      batchSize: 100
+    },
+    {
+      type: 'Environmental Variations',
+      description: 'Same robot behavior in different environments: indoor narrow, outdoor open, cluttered room, hallway. Environmental context affects navigation strategy.',
+      batchSize: 100
+    },
+    {
+      type: 'Learning and Adaptation',
+      description: 'Scenarios showing progressive improvement. Initial poor responses followed by better ones. Robot adapting to repeated patterns in sensor data.',
+      batchSize: 100
     }
   ];
 
@@ -824,7 +913,7 @@ async function generateMassiveTrainingData({ robotData, pins, modelConfig, conve
   console.log(`[NvidiaClient] After rule-based supplement: ${allTrainingData.length} total examples`);
 
   // Generate additional rule-based scenarios (200+ more by running with different random seeds)
-  for (let extra = 0; extra < 3; extra++) {
+  for (let extra = 0; extra < 10; extra++) {
     const extraData = generateTrainingDataFromRules(modelConfig, inputPins, outputPins, robotData);
     if (extraData.training_data && extraData.training_data.length > 0) {
       allTrainingData.push(...extraData.training_data);

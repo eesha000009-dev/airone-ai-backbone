@@ -322,7 +322,7 @@ function parseAiroPins(content) {
   }
 
   // Match "pin defi { ... }" block
-  const pinDefiMatch = content.match(/pin\s+defi\s*\{([^}]+)\}/s);
+  const pinDefiMatch = content.match(/pin\s+defi?[a-z]*\s*\{([^}]+)\}/is);
   if (!pinDefiMatch) return { pins, robotName };
 
   const block = pinDefiMatch[1];
@@ -339,7 +339,7 @@ function parseAiroPins(content) {
 
   // Parse each line: name = number; mode.
   // Enhanced regex supports: input, output, in, out, analog, pwm
-  const lineRegex = /(\w+)\s*=\s*(\d+)\s*;\s*(input|output|in|out|analog|pwm)\s*\./gi;
+  const lineRegex = /(\w+)\s*=\s*(\d+)\s*[;,]\s*(input|output|in|out|analog|pwm)\s*[.;,]?\s*$/gim;
   let match;
   while ((match = lineRegex.exec(block)) !== null) {
     const rawMode = match[3].toLowerCase();
