@@ -1,0 +1,396 @@
+/********************************************************************************
+ * Copyright (C) 2025 Airone and others.
+ *
+ * Airone IDE Styles — No sidebar, separate toolbar row
+ * SPDX-License-Identifier: MIT
+ ********************************************************************************/
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   0. PREVENT BLACK / DARK BACKGROUND FLASH
+   ═══════════════════════════════════════════════════════════════════════════════
+   The Electron window may flash a dark background before Theia's CSS loads.
+   Force white backgrounds on ALL containers and widgets. */
+
+html, body,
+#theia-app-shell,
+.theia-ApplicationShell,
+.lm-Widget,
+.p-Widget,
+.lm-BoxPanel,
+.p-BoxPanel,
+.lm-DockPanel,
+.p-DockPanel,
+.lm-SplitPanel,
+.p-SplitPanel,
+.lm-TabPanel,
+.p-TabPanel,
+.lm-StackedPanel,
+.p-StackedPanel,
+#theia-main-content-panel,
+.theia-main-content-panel,
+#theia-bottom-panel,
+.theia-bottom-panel,
+.theia-editor-area,
+.lm-DockPanel-widget,
+.p-DockPanel-widget,
+.theia-centerview,
+.lm-Widget.theia-centerview,
+.p-Widget.theia-centerview {
+    background-color: #ffffff !important;
+}
+
+/* Ensure the editor widget itself has a white background */
+.theia-editor,
+.theia-editor-wrapper,
+.theia-editor-content,
+.monaco-editor,
+.monaco-editor-background,
+.monaco-editor .margin,
+.monaco-editor .monaco-editor-background {
+    background-color: #ffffff !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   1. SECONDARY TOOLBAR ROW (Below the menu bar)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* Ensure the top panel container is visible — flex column for menu bar + toolbar */
+#theia-top-panel,
+.theia-top-panel {
+    display: flex !important;
+    flex-direction: column !important;
+    visibility: visible !important;
+    position: relative !important;
+    width: 100% !important;
+    height: auto !important;
+    pointer-events: auto !important;
+    z-index: 100 !important;
+    flex-shrink: 0 !important;
+}
+
+/* The menu bar CONTAINER — use both lm- (Lumino) and p- (PhosphorJS) selectors */
+.lm-MenuBar.lm-Widget,
+.p-MenuBar.p-Widget,
+.theia-MenuBar.theia-Widget,
+.theia-menubar {
+    display: flex !important;
+    visibility: visible !important;
+    position: relative !important;
+    height: auto !important;
+    pointer-events: auto !important;
+    flex-shrink: 0 !important;
+}
+
+#airo-secondary-toolbar.airo-secondary-toolbar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    width: 100% !important;
+    height: 38px !important;
+    min-height: 38px !important;
+    max-height: 38px !important;
+    background: var(--theia-editorWidget-background, #f3f3f3) !important;
+    border-bottom: 1px solid var(--theia-border-color, #ccc) !important;
+    border-top: 1px solid var(--theia-border-color, #ccc) !important;
+    padding: 0 8px !important;
+    box-sizing: border-box !important;
+    z-index: 10 !important;
+    flex-shrink: 0 !important;
+    position: relative !important;
+    visibility: visible !important;
+    opacity: 1 !important;
+}
+
+.airo-toolbar-left {
+    display: flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+}
+
+.airo-toolbar-right {
+    display: flex !important;
+    align-items: center !important;
+    gap: 4px !important;
+}
+
+/* Style the Airone toolbar buttons */
+.airo-toolbar-btn {
+    font-weight: 700 !important;
+    border-radius: 4px !important;
+    padding: 4px 12px !important;
+    cursor: pointer !important;
+    font-size: 13px !important;
+    white-space: nowrap !important;
+    line-height: 24px !important;
+    letter-spacing: 0.3px !important;
+    text-shadow: 0 1px 1px rgba(0,0,0,0.2) !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.15) !important;
+    display: inline-flex !important;
+    align-items: center !important;
+}
+
+/* SVG icon styling inside toolbar buttons */
+.airo-toolbar-icon svg {
+    display: inline-block !important;
+    vertical-align: middle !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   2. HIDE ENTIRE ACTIVITY BAR + SIDEBAR
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* Activity bar (left strip with icons) — both lm- and p- prefixes */
+#theia-activitybar,
+.theia-activity-bar,
+.lm-TabBar.theia-activity-bar,
+.p-TabBar.theia-activity-bar,
+.lm-Widget.theia-activity-bar,
+.p-Widget.theia-activity-bar,
+div[class*="activity-bar"],
+div[class*="activitybar"],
+div[class*="ActivityBar"],
+.lm-DockPanel > .lm-Widget[data-mode="activity-bar"],
+.p-DockPanel > .p-Widget[data-mode="activity-bar"],
+.theia-left-side-panel > .lm-TabBar,
+.theia-left-side-panel > .p-TabBar,
+.theia-sidebar-left-tabbar,
+#sidebar-left-tabbar {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    overflow: hidden !important;
+    visibility: hidden !important;
+    position: absolute !important;
+    left: -9999px !important;
+    pointer-events: none !important;
+}
+
+/* Left sidebar panel — both lm- and p- prefixes */
+.theia-side-panel,
+.theia-left-side-panel,
+.theia-sidebar-container,
+.lm-DockPanel > .lm-Widget[data-area="left"],
+.p-DockPanel > .p-Widget[data-area="left"],
+div[data-area="left"],
+.theia-sidebar-panel,
+#sidebar-left,
+#sidebar-left-content {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    border: none !important;
+    overflow: hidden !important;
+    visibility: hidden !important;
+    position: absolute !important;
+    left: -9999px !important;
+    pointer-events: none !important;
+}
+
+/* Hide the sidebar resize handle */
+.theia-sidebar-resize-handle,
+.lm-SplitPanel-handle[data-orientation="vertical"],
+.p-SplitPanel-handle[data-orientation="vertical"] {
+    display: none !important;
+}
+
+/* Right sidebar too */
+.theia-right-side-panel,
+.lm-DockPanel > .lm-Widget[data-area="right"],
+.p-DockPanel > .p-Widget[data-area="right"],
+div[data-area="right"],
+#sidebar-right {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    overflow: hidden !important;
+}
+
+/* Hide any leftover sidebar widget containers */
+.lm-Widget.aero-sidebar,
+.p-Widget.aero-sidebar,
+.lm-Widget[id="airo-sidebar"],
+.p-Widget[id="airo-sidebar"],
+.lm-Widget.airo-sidebar,
+.p-Widget.airo-sidebar,
+.airo-sidebar-panel {
+    display: none !important;
+}
+
+/* Hide individual activity bar items as safety net */
+.lm-TabBar-tab[data-id="search-in-workspace"],
+.p-TabBar-tab[data-id="search-in-workspace"],
+.lm-TabBar-tab[data-id="debug:debug-container"],
+.p-TabBar-tab[data-id="debug:debug-container"],
+.lm-TabBar-tab[data-id="debug:view-container"],
+.p-TabBar-tab[data-id="debug:view-container"],
+.lm-TabBar-tab[data-id="test-view-container"],
+.p-TabBar-tab[data-id="test:container"],
+.p-TabBar-tab[data-id="test-view-container"],
+.p-TabBar-tab[data-id="test:container"],
+.lm-TabBar-tab[data-id="airo-sidebar"],
+.p-TabBar-tab[data-id="airo-sidebar"],
+.lm-TabBar-tab[data-id="extensions-view-container"],
+.p-TabBar-tab[data-id="extensions-view-container"],
+.lm-TabBar-tab[data-id="explorer-view-container"],
+.p-TabBar-tab[data-id="explorer-view-container"],
+.lm-TabBar-tab[data-id="scm-view-container"],
+.p-TabBar-tab[data-id="scm-view-container"],
+.lm-TabBar-tab[data-id="output.view"],
+.p-TabBar-tab[data-id="output.view"],
+.theia-activity-bar .lm-TabBar-tab,
+.theia-activity-bar .p-TabBar-tab {
+    display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   3. HIDE BACK / FORWARD NAVIGATION ARROWS
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.theia-toolbar-item[id*="navigation.back"],
+.theia-toolbar-item[id*="navigation.forward"],
+.theia-toolbar-item[id*="navigate.back"],
+.theia-toolbar-item[id*="navigate.forward"],
+.toolbar-item[id*="navigation.back"],
+.toolbar-item[id*="navigation.forward"] {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    visibility: hidden !important;
+}
+
+button[title="Back"],
+button[title="Forward"],
+button[aria-label="Back"],
+button[aria-label="Forward"],
+.theia-toolbar button[title="Back"],
+.theia-toolbar button[title="Forward"],
+.theia-toolbar button[aria-label="Back"],
+.theia-toolbar button[aria-label="Forward"],
+.theia-toolbar [title*="Navigate Back"],
+.theia-toolbar [title*="Navigate Forward"],
+.theia-toolbar [title*="Go Back"],
+.theia-toolbar [title*="Go Forward"] {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    visibility: hidden !important;
+}
+
+.theia-toolbar-item[data-command*="navigation.back"],
+.theia-toolbar-item[data-command*="navigation.forward"],
+.theia-toolbar-item[data-command*="navigate.back"],
+.theia-toolbar-item[data-command*="navigate.forward"] {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    visibility: hidden !important;
+}
+
+[class*="toolbar-item"][data-command*="navigation"],
+[class*="toolbar-item"][data-command*="navigate.back"],
+[class*="toolbar-item"][data-command*="navigate.forward"] {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    overflow: hidden !important;
+    position: absolute !important;
+    visibility: hidden !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   4. MAKE LOGO BIGGER — In menu bar, about dialog, getting started
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* Menu bar logo - BIGGER for visibility */
+.theia-icon,
+.theia-menubar-logo,
+.lm-MenuBar-logo,
+.p-MenuBar-logo,
+[class*="MenuBar-logo"],
+[class*="menubar-logo"] {
+    background-size: 92px 92px !important;
+    width: 100px !important;
+    height: 100px !important;
+    min-width: 100px !important;
+    min-height: 100px !important;
+    padding: 4px !important;
+}
+
+/* Getting started page logo - MUCH BIGGER */
+.gs-logo {
+    background-image: var(--theia-branding-logo);
+    background-position: center center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: 700px !important;
+    height: 400px !important;
+    padding: 40px !important;
+}
+
+/* About dialog logo - MUCH BIGGER */
+.ad-logo {
+    background-image: var(--theia-branding-logo);
+    background-position: center center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: 700px !important;
+    height: 400px !important;
+    padding: 40px !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   5. MENU BAR — WHITELIST APPROACH: Hide ALL menu items, show only wanted ones
+   ═══════════════════════════════════════════════════════════════════════════════
+   Theia 1.72 uses Lumino (lm- prefix) instead of PhosphorJS (p- prefix).
+   Menu items do NOT have aria-label attributes. The label text is in a child
+   element: .lm-MenuBar-itemLabel
+
+   Since CSS cannot select by text content, we use a hybrid approach:
+   - CSS: Hide ALL menu items by default (both lm- and p- prefixes)
+   - JavaScript: Show only the allowed items by reading their label text
+   - CSS data attribute: JS adds data-airone-visible="true" to allowed items,
+     and CSS shows items with that attribute */
+
+/* Step 1: Hide ALL menu bar items (both Lumino and PhosphorJS) */
+.lm-MenuBar-item,
+.p-MenuBar-item {
+    display: none !important;
+}
+
+/* Step 2: Show only items that JavaScript has marked as visible */
+.lm-MenuBar-item[data-airone-visible="true"],
+.p-MenuBar-item[data-airone-visible="true"] {
+    display: flex !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   6. HIDE .theia AND .airone-ide FOLDERS FROM FILE EXPLORER
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.theia-TreeView .theia-TreeNodeContent[data-file$=".airone-ide"],
+.theia-TreeView .theia-TreeNodeContent[data-file$=".theia"],
+.theia-TreeViewContent .theia-TreeNodeContent[title$=".airone-ide"],
+.theia-TreeViewContent .theia-TreeNodeContent[title$=".theia"] {
+    display: none !important;
+}
+
+.theia-TreeNodeContent[title=".theia"],
+.theia-TreeNodeContent[title=".airone-ide"] {
+    display: none !important;
+}

@@ -1,0 +1,154 @@
+apply plugin: 'com.android.application'
+
+android {
+    namespace "com.airone.ide"
+    compileSdk rootProject.ext.compileSdkVersion
+    defaultConfig {
+        applicationId "com.airone.ide"
+        minSdkVersion rootProject.ext.minSdkVersion
+        targetSdkVersion rootProject.ext.targetSdkVersion
+        versionCode 3
+        versionName "0.3.0"
+        testInstrumentationRunner "androidx.test.runner.AndroidJUnitRunner"
+        aaptOptions {
+             // Files and dirs to omit from the packaged assets dir, modified to accommodate modern web apps.
+             // Default: https://android.googlesource.com/platform/frameworks/base/+/282e181b58cf72b6ca770dc7ca5f91f135444502/tools/aapt/AaptAssets.cpp#61
+            ignoreAssetsPattern '!.svn:!.git:!.ds_store:!*.scc:.*:!CVS:!thumbs.db:!picasa.ini:!*~'
+        }
+    }
+    signingConfigs {
+        release {
+            // Signing config reads from environment variables (set by CI) or local keystore
+            storeFile file('../../android-signing/airone-ide-release.keystore')
+            storePassword System.getenv("ANDROID_STORE_PASSWORD") ?: 'airone2024'
+            keyAlias System.getenv("ANDROID_KEY_ALIAS") ?: 'airone-ide'
+            keyPassword System.getenv("ANDROID_KEY_PASSWORD") ?: 'airone2024'
+        }
+    }
+    buildTypes {
+        release {
+            signingConfig signingConfigs.release
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+        }
+        debug {
+            debuggable true
+        }
+    }
+}
+
+repositories {
+    flatDir{
+        dirs '../capacitor-cordova-android-plugins/src/main/libs', 'libs'
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+    implementation "androidx.appcompat:appcompat:$androidxAppCompatVersion"
+    implementation "androidx.coordinatorlayout:coordinatorlayout:$androidxCoordinatorLayoutVersion"
+    implementation "androidx.core:core-splashscreen:$coreSplashScreenVersion"
+    implementation project(':capacitor-android')
+    testImplementation "junit:junit:$junitVersion"
+    androidTestImplementation "androidx.test.ext:junit:$androidxJunitVersion"
+    androidTestImplementation "androidx.test.espresso:espresso-core:$androidxEspressoCoreVersion"
+    implementation project(':capacitor-cordova-android-plugins')
+}
+
+apply from: 'capacitor.build.gradle'
+
+try {
+    def servicesJSON = file('google-services.json')
+    if (servicesJSON.text) {
+        apply plugin: 'com.google.gms.google-services'
+    }
+} catch(Exception e) {
+    logger.info("google-services.json not found, google-services plugin not applied. Push Notifications won't work")
+}
+
+// ========================================
+// Task: Copy backend files to assets
+// Copies the Theia backend from ../../lib/backend/ to src/main/assets/backend/
+// These files are extracted by NodeJsBackendService at runtime.
+// ========================================
+task copyBackendToAssets(type: Copy) {
+    description = 'Copy Theia backend files to Android assets directory'
+    group = 'airone'
+
+    def backendSource = file('../../lib/backend')
+    def backendDest = file('src/main/assets/backend')
+
+    if (backendSource.exists()) {
+        from backendSource
+        into backendDest
+        exclude '*.map', '.git', '*.md'
+    } else {
+        logger.warn("Backend source directory not found: ${backendSource.absolutePath}")
+        doLast {
+            backendDest.mkdirs()
+            def placeholder = new File(backendDest, '.gitkeep')
+            if (!placeholder.exists()) {
+                placeholder.text = '# Placeholder - backend files will be copied here during build\n'
+            }
+        }
+    }
+}
+
+// ========================================
+// Task: Check Node.js binary for Android
+//
+// The Node.js binary can be either:
+// 1. A standalone binary compiled from source with NDK (assets/nodejs/bin/node)
+// 2. A Termux binary with shared libraries (assets/nodejs/bin/node + assets/nodejs/lib/*.so)
+//
+// The download-termux-nodejs.sh script handles downloading from Termux.
+// The NodeJsBackendService handles setting LD_LIBRARY_PATH at runtime.
+// ========================================
+task checkNodeJsBinary {
+    description = 'Check if Node.js binary for Android is available in assets'
+    group = 'airone'
+
+    def nodeDestDir = file('src/main/assets/nodejs/bin')
+    def nodeBinary = new File(nodeDestDir, 'node')
+    def libDir = file('src/main/assets/nodejs/lib')
+
+    doLast {
+        nodeDestDir.mkdirs()
+
+        if (nodeBinary.exists() && nodeBinary.length() > 0) {
+            logger.lifecycle("✓ Node.js binary found: ${nodeBinary.absolutePath}")
+            logger.lifecycle("  Size: ${nodeBinary.length()} bytes")
+
+            // Check for shared libraries (Termux binary)
+            if (libDir.exists()) {
+                def soFiles = libDir.listFiles({ dir, name -> name.endsWith('.so') } as FilenameFilter)
+                if (soFiles != null && soFiles.length > 0) {
+                    logger.lifecycle("  ✓ Shared libraries found: ${soFiles.length} files")
+                    logger.lifecycle("    The Theia backend will run locally on the device (Termux binary)")
+                } else {
+                    logger.lifecycle("  No shared libraries - standalone binary (NDK compiled)")
+                }
+            } else {
+                logger.lifecycle("  No shared libraries - standalone binary (NDK compiled)")
+            }
+        } else {
+            logger.warn("============================================")
+            logger.warn("Node.js binary for Android ARM64 not found.")
+            logger.warn("The app will work in 'remote backend' mode.")
+            logger.warn("")
+            logger.warn("To enable local backend mode, run:")
+            logger.warn("  ./scripts/download-termux-nodejs.sh")
+            logger.warn("============================================")
+
+            def marker = new File(nodeDestDir, '.gitkeep')
+            if (!marker.exists()) {
+                marker.text = '# Node.js binary for Android ARM64 should be placed here as "node"\n'
+            }
+        }
+    }
+}
+
+// Run tasks before preBuild
+preBuild.dependsOn copyBackendToAssets
+preBuild.dependsOn checkNodeJsBinary
+checkNodeJsBinary.mustRunAfter copyBackendToAssets

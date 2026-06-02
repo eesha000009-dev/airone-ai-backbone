@@ -1,0 +1,272 @@
+/********************************************************************************
+ * Copyright (C) 2025 Airone and others.
+ *
+ * This program and the accompanying materials are made available under the
+ * terms of the MIT License, which is available in the project root.
+ *
+ * SPDX-License-Identifier: MIT
+ ********************************************************************************/
+
+:root {
+    --theia-branding-logo: url(../icons/512-512.png);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   PREVENT BLACK / DARK BACKGROUND FLASH
+   Force white backgrounds on all top-level containers so the Electron window
+   never shows a dark background while loading.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+html, body,
+#theia-app-shell,
+.theia-ApplicationShell,
+.lm-Widget,
+.p-Widget,
+.lm-BoxPanel,
+.p-BoxPanel,
+.lm-DockPanel,
+.p-DockPanel,
+.lm-SplitPanel,
+.p-SplitPanel,
+#theia-main-content-panel,
+.theia-main-content-panel,
+#theia-bottom-panel,
+.theia-bottom-panel,
+.theia-editor-area,
+.theia-centerview {
+    background-color: #ffffff !important;
+}
+
+.theia-icon {
+    background-image: url("../icons/512-512.png");
+    background-position: center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: 100px;
+    height: 100px;
+    min-width: 100px;
+    min-height: 100px;
+}
+
+body[data-theia-branding="next"] {
+    --theia-branding-logo: url(../icons/512-512-next.png);
+}
+
+body[data-theia-branding="next"] .theia-icon {
+    background-image: url("../icons/512-512-next.png");
+}
+
+.gs-blue-header {
+    color: #27ae60;
+    text-transform: capitalize;
+    font-weight: 600;
+}
+
+.gs-text-bold {
+    font-weight: 600;
+}
+
+.gs-text-underline {
+    text-decoration: underline;
+}
+
+.gs-float {
+    float: right;
+    padding-left: 20px;
+}
+
+/* ─── Make logo MUCH bigger in Getting Started / About dialog ───────────────── */
+
+.gs-logo {
+    background-image: var(--theia-branding-logo);
+    background-position: center center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: 700px !important;
+    height: 400px !important;
+    padding: 40px !important;
+}
+
+.ad-logo {
+    background-image: var(--theia-branding-logo);
+    background-position: center center;
+    background-repeat: no-repeat;
+    background-size: contain;
+    width: 700px !important;
+    height: 400px !important;
+    padding: 40px !important;
+}
+
+.ad-float {
+    float: right;
+}
+
+.ad-container {
+    padding: 20px;
+    width: 1150px;
+    height: 700;
+}
+
+ul.theia-aboutExtensions {
+    height: 450px;
+    overflow: hidden;
+    overflow-y: scroll;
+    list-style-type: none;
+    padding: 0;
+    margin-left: 10px;
+}
+
+/* ─── Hide .airone-ide and .theia config folders from file explorer ─────── */
+
+.theia-TreeView .theia-TreeNodeContent[data-file$=".airone-ide"],
+.theia-TreeView .theia-TreeNodeContent[data-file$=".theia"],
+.theia-TreeViewContent .theia-TreeNodeContent[title$=".airone-ide"],
+.theia-TreeViewContent .theia-TreeNodeContent[title$=".theia"] {
+    display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   MENU BAR — WHITELIST APPROACH (Lumino + PhosphorJS)
+   ═══════════════════════════════════════════════════════════════════════════════
+   Theia 1.72 uses Lumino (lm- prefix). Menu items do NOT have aria-label.
+   CSS hides all items; JavaScript marks allowed items with data-airone-visible. */
+
+/* Step 1: Hide ALL menu bar items */
+.lm-MenuBar-item,
+.p-MenuBar-item {
+    display: none !important;
+}
+
+/* Step 2: Show only items marked by JavaScript */
+.lm-MenuBar-item[data-airone-visible="true"],
+.p-MenuBar-item[data-airone-visible="true"] {
+    display: flex !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   HIDE ENTIRE SIDEBAR / ACTIVITY BAR (Lumino + PhosphorJS)
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+#theia-activitybar,
+.theia-activity-bar,
+.lm-TabBar.theia-activity-bar,
+.p-TabBar.theia-activity-bar,
+.theia-left-side-panel,
+.theia-sidebar-container,
+div[data-area="left"] {
+    display: none !important;
+    width: 0 !important;
+    min-width: 0 !important;
+    max-width: 0 !important;
+    overflow: hidden !important;
+    visibility: hidden !important;
+    position: absolute !important;
+    left: -9999px !important;
+    pointer-events: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   MAKE MENU BAR LOGO BIGGER
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+.theia-icon {
+    width: 100px !important;
+    height: 100px !important;
+    min-width: 100px !important;
+    min-height: 100px !important;
+    background-size: 92px 92px !important;
+    padding: 4px !important;
+}
+
+/* ─── Hide theia folder in navigator ──────────────────────────────────────── */
+
+.theia-TreeNodeContent[title=".theia"],
+.theia-TreeNodeContent[title=".airone-ide"] {
+    display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   HIDE UNWANTED FILE MENU ITEMS
+   Hide Theia's built-in "New File" and other items we don't want.
+   Only "New Sketch" and "Examples" should appear in the File menu.
+   ═══════════════════════════════════════════════════════════════════════════════ */
+
+/* Hide "New File" command in all menus (Theia built-in) */
+[data-command="core.newFile"],
+[data-command="core:newFile"],
+.lm-Menu-item[data-command="core.newFile"],
+.lm-Menu-item[data-command="core:newFile"],
+.p-Menu-item[data-command="core.newFile"],
+.p-Menu-item[data-command="core:newFile"] {
+    display: none !important;
+}
+
+/* Hide "New Folder" command in all menus */
+[data-command="core.newFolder"],
+[data-command="core:newFolder"],
+.lm-Menu-item[data-command="core.newFolder"],
+.p-Menu-item[data-command="core.newFolder"] {
+    display: none !important;
+}
+
+/* Hide "Open..." (Theia built-in file open) */
+[data-command="core.openFile"],
+[data-command="core:openFile"],
+.lm-Menu-item[data-command="core.openFile"],
+.p-Menu-item[data-command="core.openFile"] {
+    display: none !important;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════════
+   ENSURE THE TOP PANEL AND MENU BAR CONTAINER ARE VISIBLE
+   ═══════════════════════════════════════════════════════════════════════════════
+   The top panel is a flex column: menu bar on top, secondary toolbar below.
+   Theia's Lumino BoxPanel positions children absolutely, so the top panel's
+   height MUST be auto so it can grow to include the toolbar. */
+
+#theia-top-panel,
+.theia-top-panel {
+    display: flex !important;
+    flex-direction: column !important;
+    visibility: visible !important;
+    position: relative !important;
+    width: 100% !important;
+    height: auto !important;
+    pointer-events: auto !important;
+    z-index: 100 !important;
+    flex-shrink: 0 !important;
+}
+
+/* The menu bar CONTAINER (not items) must be visible — both Lumino and PhosphorJS */
+.lm-MenuBar.lm-Widget,
+.p-MenuBar.p-Widget,
+.theia-MenuBar.theia-Widget,
+.theia-menubar {
+    display: flex !important;
+    visibility: visible !important;
+    position: relative !important;
+    height: auto !important;
+    pointer-events: auto !important;
+    flex-shrink: 0 !important;
+}
+
+/* ─── Secondary Toolbar Row (inside top panel, below menu bar) ───────────── */
+
+#airo-secondary-toolbar.airo-secondary-toolbar {
+    display: flex !important;
+    align-items: center !important;
+    justify-content: space-between !important;
+    width: 100% !important;
+    height: 38px !important;
+    min-height: 38px !important;
+    max-height: 38px !important;
+    background: var(--theia-editorWidget-background, #f3f3f3) !important;
+    border-bottom: 1px solid var(--theia-border-color, #ccc) !important;
+    border-top: 1px solid var(--theia-border-color, #ccc) !important;
+    padding: 0 8px !important;
+    box-sizing: border-box !important;
+    z-index: 10 !important;
+    flex-shrink: 0 !important;
+    position: relative !important;
+    visibility: visible !important;
+}

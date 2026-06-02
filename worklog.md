@@ -27,3 +27,24 @@ Stage Summary:
 - ESP32 code now generates correct HC-SR04 trigger sequence and buzzer tone() calls
 - Parser supports both natural-language and legacy .airo syntax
 - Both repos pushed: airone-ide (master), airone-ai-backbone (main)
+---
+Task ID: 1
+Agent: Main
+Task: Fix Airone IDE - Remove Verify button, add New Sketch toolbar button, hide New File from menu
+
+Work Log:
+- Viewed uploaded screenshot to identify current IDE state (Verify button present, no New Sketch toolbar button)
+- Removed Verify button from airo-toolbar-contribution.ts
+- Removed AIRO_VERIFY_COMMAND definition, registration, and keybinding from airo-contribution.ts
+- Added New Sketch button to toolbar (purple, with file+ icon) in airo-toolbar-contribution.ts
+- Added newSketchIconSvg getter for the new button
+- Reassigned Ctrl+R keybinding from Verify to Compile
+- Added CSS rules to hide Theia built-in New File, New Folder, Open File from File menu
+- Added DOM-based hiding of these items in theia-ide-contribution.tsx as fallback
+- Pushed all changes to GitHub (eesha000009-dev/airone-ide, master branch)
+
+Stage Summary:
+- Toolbar now shows: New Sketch, Compile, Upload, Serial Monitor, Restart to Update
+- File menu now shows: New Sketch, Examples (New File hidden via CSS + DOM)
+- Ctrl+R now triggers Compile instead of Verify
+- Commit: ac6389e pushed to master
