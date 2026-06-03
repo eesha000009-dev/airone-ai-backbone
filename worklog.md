@@ -48,3 +48,25 @@ Stage Summary:
 - File menu now shows: New Sketch, Examples (New File hidden via CSS + DOM)
 - Ctrl+R now triggers Compile instead of Verify
 - Commit: ac6389e pushed to master
+---
+Task ID: 1
+Agent: Main
+Task: Fix failed GitHub Actions build for Airone IDE
+
+Work Log:
+- Checked GitHub Actions: 3 consecutive builds failed (Windows, Linux, Android)
+- Identified error: `src/browser/airo-contribution.ts(199,36): error TS2488: Type 'NodeListOf<Element>' must have a '[Symbol.iterator]()' method that returns an iterator`
+- Root cause: `tsconfig.json` had `"lib": ["ES2020", "DOM"]` but was missing `"DOM.Iterable"` — required for iterating `NodeListOf` with `for...of`
+- Fix: Added `"DOM.Iterable"` to the `lib` array in `theia-extensions/airo/tsconfig.json`
+- Committed and pushed: `d549823` — "fix: add DOM.Iterable to tsconfig lib to fix NodeListOf iteration error"
+- Triggered workflow_dispatch build
+- Monitored build progress — all 3 jobs passed:
+  - Linux Build: ✅ success
+  - Android Build: ✅ success
+  - Windows Build: ✅ success
+- GitHub Release created: `v0.1.0-build.202606030110` with all artifacts (APK, AppImage, deb, exe)
+
+Stage Summary:
+- Build failure fixed by adding DOM.Iterable to tsconfig lib
+- All platforms (Windows, Linux, Android) now build successfully
+- Release v0.1.0-build.202606030110 published with 7 artifacts
