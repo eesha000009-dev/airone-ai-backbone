@@ -70,3 +70,29 @@ Stage Summary:
 - Build failure fixed by adding DOM.Iterable to tsconfig lib
 - All platforms (Windows, Linux, Android) now build successfully
 - Release v0.1.0-build.202606030110 published with 7 artifacts
+---
+Task ID: 2
+Agent: Main
+Task: Implement Arduino CLI auto-install and fix build failures
+
+Work Log:
+- Analyzed compiler output: Steps 1-3 work (.airo → C++), Step 4 fails because Arduino CLI not found
+- Rewrote `airo-compiler-service.ts` with auto-install capability:
+  - `findArduinoCli()`: now checks PATH then `~/.airone/tools/`
+  - `ensureArduinoCli()`: auto-downloads Arduino CLI from arduino.cc to `~/.airone/tools/`
+  - `ensureEsp32Core()`: auto-installs ESP32 board support via `arduino-cli core install`
+  - `installRequiredLibs()`: auto-installs WebSockets, ArduinoJson, etc.
+  - Uses dedicated config dir at `~/.airone/arduino-cli/`
+  - Platform-specific downloads (Windows zip, macOS/Linux tar.gz)
+  - Increased build timeout to 180s for first-time ESP32 core compilation
+- Fixed TS2367 error: `process.arch` never returns 'aarch64' (it uses 'arm64')
+- Pushed 2 commits: `85bbfa1` (feature) and `712ee19` (TS fix)
+- Monitored build: all 3 platforms (Windows, Linux, Android) passed
+- Release `v0.1.0-build.202606030136` published with all 7 artifacts
+
+Stage Summary:
+- Arduino CLI auto-install: ✅ implemented
+- ESP32 board auto-install: ✅ implemented
+- Required libraries auto-install: ✅ implemented
+- Build passing on all platforms: ✅
+- New release: v0.1.0-build.202606030136
