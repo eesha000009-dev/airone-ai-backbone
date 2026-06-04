@@ -131,15 +131,17 @@ ul.theia-aboutExtensions {
    Theia 1.72 uses Lumino (lm- prefix). Menu items do NOT have aria-label.
    CSS hides all items; JavaScript marks allowed items with data-airone-visible. */
 
-/* Step 1: Hide ALL menu bar items */
-.lm-MenuBar-item,
-.p-MenuBar-item {
+/* Step 1: Hide ALL menu bar items — but only after JS has had a chance to run.
+   We use a class on body that JS adds after it's ready. This prevents the menus
+   from being permanently hidden if JS crashes during initialization. */
+body[data-airone-ui-ready="true"] .lm-MenuBar-item,
+body[data-airone-ui-ready="true"] .p-MenuBar-item {
     display: none !important;
 }
 
 /* Step 2: Show only items marked by JavaScript */
-.lm-MenuBar-item[data-airone-visible="true"],
-.p-MenuBar-item[data-airone-visible="true"] {
+body[data-airone-ui-ready="true"] .lm-MenuBar-item[data-airone-visible="true"],
+body[data-airone-ui-ready="true"] .p-MenuBar-item[data-airone-visible="true"] {
     display: flex !important;
 }
 

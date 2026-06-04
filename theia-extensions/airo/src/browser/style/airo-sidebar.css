@@ -367,15 +367,16 @@ button[aria-label="Forward"],
    - CSS data attribute: JS adds data-airone-visible="true" to allowed items,
      and CSS shows items with that attribute */
 
-/* Step 1: Hide ALL menu bar items (both Lumino and PhosphorJS) */
-.lm-MenuBar-item,
-.p-MenuBar-item {
+/* Step 1: Hide ALL menu bar items (both Lumino and PhosphorJS)
+   Only activate after JS signals readiness — prevents hidden menus if JS crashes */
+body[data-airone-ui-ready="true"] .lm-MenuBar-item,
+body[data-airone-ui-ready="true"] .p-MenuBar-item {
     display: none !important;
 }
 
 /* Step 2: Show only items that JavaScript has marked as visible */
-.lm-MenuBar-item[data-airone-visible="true"],
-.p-MenuBar-item[data-airone-visible="true"] {
+body[data-airone-ui-ready="true"] .lm-MenuBar-item[data-airone-visible="true"],
+body[data-airone-ui-ready="true"] .p-MenuBar-item[data-airone-visible="true"] {
     display: flex !important;
 }
 

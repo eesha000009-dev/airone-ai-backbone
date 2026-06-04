@@ -144,12 +144,22 @@ export class AiroContribution implements CommandContribution, MenuContribution, 
     protected _refreshTimer: number | undefined;
 
     constructor() {
-        // Load board/port data on startup
-        setTimeout(() => {
-            this.loadBoards();
-            this.refreshPorts();
-            this._refreshTimer = window.setInterval(() => this.refreshPorts(), 5000);
-        }, 2000);
+        // Load board/port data on startup — deferred to avoid crashes during Theia init
+        try {
+            setTimeout(() => {
+                try {
+                    this.loadBoards();
+                    this.refreshPorts();
+                    this._refreshTimer = window.setInterval(() => {
+                        try { this.refreshPorts(); } catch { /* ignore */ }
+                    }, 5000);
+                } catch (e) {
+                    console.error('[AiroContribution] Error in deferred init:', e);
+                }
+            }, 3000);
+        } catch (e) {
+            console.error('[AiroContribution] Error in constructor:', e);
+        }
     }
 
     // ─── Data Loading ──────────────────────────────────────────────────
